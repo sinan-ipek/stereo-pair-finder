@@ -177,13 +177,26 @@ private fun ResultCard(result: AnalysisResult, onSave: (AnalysisResult) -> Unit)
             )
             Text("Ortak geçerli alan: %.1f%%".format(result.commonAreaRatio * 100))
             Text("Algoritma: ${result.algorithmVersion}")
-            Text(
-                "Kadraj: ${result.framingMode} · Konu güveni %.0f%% (%d örnek)".format(
-                    result.subjectConfidence * 100.0,
-                    result.subjectEvidenceCount
-                )
-            )
+            Text("Kadraj: ${result.framingMode}")
             Text("Yoğun paralaks örneği: ${result.parallaxEvidenceCount}")
+            result.parallaxBands?.let {
+                Text(
+                    "Paralaks Ü/O/A: %.2f · %.2f · %.2f px".format(
+                        it.top,
+                        it.middle,
+                        it.bottom
+                    )
+                )
+            }
+            result.uniformityBands?.let {
+                Text(
+                    "Tekdüzelik Ü/O/A: %.1f · %.1f · %.1f (düşük = düz alan)".format(
+                        it.top,
+                        it.middle,
+                        it.bottom
+                    )
+                )
+            }
             if (
                 result.cropCenterXPercent != null &&
                 result.cropCenterYPercent != null &&

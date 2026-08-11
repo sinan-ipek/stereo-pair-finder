@@ -2,6 +2,7 @@ package com.stereopairfinder.model
 
 import android.graphics.Bitmap
 import android.net.Uri
+import com.stereopairfinder.image.BandValues
 
 const val DEFAULT_MAX_SECONDS = 15
 const val DEFAULT_SIMILARITY = 72
@@ -41,9 +42,9 @@ data class AnalysisResult(
     val cropCenterYPercent: Double? = null,
     val cropSidePercent: Double? = null,
     val parallaxEvidenceCount: Int = 0,
-    val framingMode: String = "merkez / en büyük kare",
-    val subjectConfidence: Double = 0.0,
-    val subjectEvidenceCount: Int = 0
+    val framingMode: String = "merkezden kırp",
+    val parallaxBands: BandValues? = null,
+    val uniformityBands: BandValues? = null
 ) {
     val saveable get() = status == PairStatus.MATCHED
 }

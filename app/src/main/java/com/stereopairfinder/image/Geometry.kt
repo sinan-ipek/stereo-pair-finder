@@ -11,466 +11,168 @@ data class CropSquare(val left: Int, val top: Int, val right: Int, val bottom: I
 data class ParallaxSample(
     val x: Double,
     val y: Double,
-    /** Signed rectified disparity: left.x - right.x. */
+    /** Signed horizontal disparity after rectification. */
     val disparity: Double
 )
 
-data class SubjectGuidance(
-    val x: Double,
-    val y: Double,
-    /** 0 = unreliable, 1 = a compact subject clearly dominates its background. */
-    val confidence: Double,
-    val evidenceCount: Int,
-    /** Approximate half-size of the detected visual region in source pixels. */
-    val radiusX: Double = Double.NaN,
-    val radiusY: Double = Double.NaN
-)
+data class BandValues(
+    val top: Double,
+    val middle: Double,
+    val bottom: Double
+) {
+    fun value(band: VerticalBand): Double = when (band) {
+        VerticalBand.TOP -> top
+        VerticalBand.MIDDLE -> middle
+        VerticalBand.BOTTOM -> bottom
+    }
+}
+
+enum class VerticalBand { TOP, MIDDLE, BOTTOM }
 
 data class FramingDecision(
     val square: CropSquare,
     val mode: String,
-    val subjectConfidence: Double,
-    val subjectEvidenceCount: Int,
     val targetX: Double,
-    val targetY: Double
+    val targetY: Double,
+    val parallax: BandValues,
+    /** Lower values mean a flatter, more nearly single-colour band. */
+    val uniformity: BandValues
 )
 
+/**
+ * Deliberately small vertical-framing policy.
+ *
+ * The image is treated as three broad horizontal bands. A clearly stronger
+ * parallax band is preserved. If parallax is indecisive, the flatter of the top
+ * and bottom bands is removed. No object detection and no horizontal targeting
+ * are performed.
+ */
 object Geometry {
-    private const val SCORE_EPSILON = 1e-9
-    private const val MIN_PARALLAX_SAMPLES = 3
-    private const val MIN_SUBJECT_CONFIDENCE = 0.55
-    private const val MIN_SUBJECT_PARALLAX_SHARE = 0.08
-    private const val MIN_SUBJECT_PARALLAX_ENRICHMENT = 1.10
-    private const val MIN_CROP_RATIO = 0.92
+    private const val EPSILON = 1e-9
+    private const val MIN_SAMPLES_IN_WINNING_BAND = 4
+    private const val PARALLAX_RATIO = 1.20
+    private const val PARALLAX_MARGIN_PX = 0.35
+    private const val UNIFORMITY_RATIO = 0.80
+    private const val UNIFORMITY_MARGIN = 3.0
 
-    /**
-     * Finds a fully valid square crop.
-     *
-     * Compatibility entry point used by the geometry tests. The adaptive overload
-     * below also accepts visual-subject guidance and reports how the decision was
-     * made.
-     */
     fun largestValidSquare(
         mask: ByteArray,
         width: Int,
         height: Int,
         parallaxSamples: List<ParallaxSample> = emptyList(),
-        subject: SubjectGuidance? = null
-    ): CropSquare? = adaptiveValidSquare(
-        mask,
-        width,
-        height,
-        parallaxSamples,
-        subject
+        uniformity: BandValues? = null
+    ): CropSquare? = verticalCrop(
+        mask = mask,
+        width = width,
+        height = height,
+        parallaxSamples = parallaxSamples,
+        uniformity = uniformity
     )?.square
 
-    /**
-     * Selects the largest crop that preserves most of the useful recentering.
-     *
-     * Candidate sides are tested from 100% down to 92% of the largest valid
-     * square. We stop at the first (therefore largest) side that achieves the
-     * requested share of all movement that is geometrically possible. This makes
-     * crop amount scene-dependent instead of hard-coding 92% or 96%.
-     */
-    fun adaptiveValidSquare(
+    fun verticalCrop(
         mask: ByteArray,
         width: Int,
         height: Int,
         parallaxSamples: List<ParallaxSample> = emptyList(),
-        subject: SubjectGuidance? = null
+        uniformity: BandValues? = null
     ): FramingDecision? {
         require(width >= 0 && height >= 0)
         require(mask.size == width * height)
-        if (width == 0 || height == 0) return null
-
-        val imageCenterX = width / 2.0
-        val imageCenterY = height / 2.0
-        val largest = largestSquares(mask, width, height)
-        if (largest.side == 0) return null
-
-        val centeredLargest = largest.squares.minByOrNull {
-            centerDistanceSquared(it, imageCenterX, imageCenterY)
-        } ?: return null
+        if (width == 0 || height == 0 || mask.none { (it.toInt() and 0xff) != 0 }) return null
 
         val usableSamples = parallaxSamples.filter {
             it.x.isFinite() && it.y.isFinite() && it.disparity.isFinite() &&
                 it.x >= 0.0 && it.x < width && it.y >= 0.0 && it.y < height
         }
-        val weightedEvidence = relativeParallaxEvidence(usableSamples, width, height)
-        val totalWeight = weightedEvidence.sumOf { it.weight }
-        val hasParallax = weightedEvidence.size >= MIN_PARALLAX_SAMPLES &&
-            totalWeight > SCORE_EPSILON
-        val parallaxX = if (hasParallax) {
-            weightedEvidence.sumOf { it.sample.x * it.weight } / totalWeight
-        } else imageCenterX
-        val parallaxY = if (hasParallax) {
-            weightedEvidence.sumOf { it.sample.y * it.weight } / totalWeight
-        } else imageCenterY
+        val grouped = VerticalBand.entries.associateWith { band ->
+            usableSamples.filter { bandAt(it.y, height) == band }
+        }
+        val parallax = BandValues(
+            top = robustMeanAbsolute(grouped.getValue(VerticalBand.TOP).map { it.disparity }),
+            middle = robustMeanAbsolute(grouped.getValue(VerticalBand.MIDDLE).map { it.disparity }),
+            bottom = robustMeanAbsolute(grouped.getValue(VerticalBand.BOTTOM).map { it.disparity })
+        )
+        val texture = uniformity?.sanitized() ?: BandValues(0.0, 0.0, 0.0)
 
-        val visualCandidate = subject?.takeIf {
-            it.confidence.isFinite() && it.confidence >= MIN_SUBJECT_CONFIDENCE &&
-                it.x.isFinite() && it.y.isFinite() &&
-                it.x in 0.0..<width.toDouble() && it.y in 0.0..<height.toDouble()
-        }
-        val usableSubject = visualCandidate?.takeIf {
-            !hasParallax || subjectHasParallaxSupport(
-                it,
-                weightedEvidence,
-                totalWeight,
-                width,
-                height
-            )
-        }
-        if (usableSubject == null && !hasParallax) {
-            return FramingDecision(
-                centeredLargest,
-                "merkez / en büyük kare",
-                subject?.confidence?.coerceIn(0.0, 1.0) ?: 0.0,
-                subject?.evidenceCount ?: 0,
-                imageCenterX,
-                imageCenterY
-            )
-        }
+        val ranked = VerticalBand.entries.sortedByDescending(parallax::value)
+        val winner = ranked.first()
+        val winnerScore = parallax.value(winner)
+        val runnerUpScore = parallax.value(ranked[1])
+        val winnerCount = grouped.getValue(winner).size
+        val clearParallax = winnerCount >= MIN_SAMPLES_IN_WINNING_BAND &&
+            winnerScore >= runnerUpScore * PARALLAX_RATIO + PARALLAX_MARGIN_PX
 
-        // Strict hierarchy: a defensible subject owns the composition. If the
-        // visual candidate is stationary while the rest of the image contains
-        // depth (aircraft-wing case), it is rejected and parallax owns the crop.
-        val targetX = usableSubject?.x ?: parallaxX
-        val targetY = usableSubject?.y ?: parallaxY
-        val mode = when {
-            usableSubject != null -> "uyarlanabilir: belirgin konu"
-            visualCandidate != null && hasParallax -> "uyarlanabilir: paralaks (sabit konu elendi)"
-            else -> "uyarlanabilir: paralaks"
-        }
-
-        val candidates = (100 downTo (MIN_CROP_RATIO * 100).toInt()).mapNotNull { percent ->
-            val side = maxOf(1, (largest.side * percent / 100.0).toInt())
-            closestValidSquare(mask, width, height, side, targetX, targetY)
-        }.distinctBy { it.width }
-        if (candidates.isEmpty()) {
-            return FramingDecision(
-                centeredLargest,
-                mode,
-                subject?.confidence?.coerceIn(0.0, 1.0) ?: 0.0,
-                subject?.evidenceCount ?: 0,
-                targetX,
-                targetY
-            )
-        }
-
-        val initialDistance = centerDistanceSquared(candidates.first(), targetX, targetY)
-        val bestDistance = candidates.minOf { centerDistanceSquared(it, targetX, targetY) }
-        val possibleImprovement = initialDistance - bestDistance
-        val negligible = width.coerceAtMost(height) * 0.015
-        val chosen = if (possibleImprovement <= negligible * negligible) {
-            candidates.first()
+        val choice = if (clearParallax) {
+            when (winner) {
+                VerticalBand.TOP -> CropChoice.BOTTOM_CUT to "alttan kırp · üst paralaks güçlü"
+                VerticalBand.MIDDLE -> CropChoice.CENTER to "merkezden kırp · orta paralaks güçlü"
+                VerticalBand.BOTTOM -> CropChoice.TOP_CUT to "üstten kırp · alt paralaks güçlü"
+            }
         } else {
-            val movementRetention = if (usableSubject != null) 0.88 else 0.85
-            val allowedDistance = initialDistance - possibleImprovement * movementRetention
-            candidates.firstOrNull {
-                centerDistanceSquared(it, targetX, targetY) <= allowedDistance + SCORE_EPSILON
-            } ?: candidates.minBy { centerDistanceSquared(it, targetX, targetY) }
+            uniformityChoice(texture)
         }
 
+        val square = cropAt(width, height, choice.first)
         return FramingDecision(
-            chosen,
-            mode,
-            subject?.confidence?.coerceIn(0.0, 1.0) ?: 0.0,
-            subject?.evidenceCount ?: 0,
-            targetX,
-            targetY
+            square = square,
+            mode = choice.second,
+            targetX = width / 2.0,
+            targetY = (square.top + square.bottom) / 2.0,
+            parallax = parallax,
+            uniformity = texture
         )
     }
 
-    private data class LargestSquares(
-        val side: Int,
-        val squares: List<CropSquare>
+    private enum class CropChoice { TOP_CUT, CENTER, BOTTOM_CUT }
+
+    private fun uniformityChoice(values: BandValues): Pair<CropChoice, String> {
+        val topIsFlatter = values.top + UNIFORMITY_MARGIN <= values.bottom &&
+            values.top <= values.bottom * UNIFORMITY_RATIO
+        val bottomIsFlatter = values.bottom + UNIFORMITY_MARGIN <= values.top &&
+            values.bottom <= values.top * UNIFORMITY_RATIO
+        return when {
+            topIsFlatter -> CropChoice.TOP_CUT to "üstten kırp · üst bölge daha tekdüze"
+            bottomIsFlatter -> CropChoice.BOTTOM_CUT to "alttan kırp · alt bölge daha tekdüze"
+            else -> CropChoice.CENTER to "merkezden kırp · fark belirgin değil"
+        }
+    }
+
+    private fun cropAt(width: Int, height: Int, choice: CropChoice): CropSquare {
+        val side = min(width, height)
+        val left = (width - side) / 2
+        val top = if (height <= side) {
+            0
+        } else {
+            when (choice) {
+                CropChoice.TOP_CUT -> height - side
+                CropChoice.CENTER -> (height - side) / 2
+                CropChoice.BOTTOM_CUT -> 0
+            }
+        }
+        return CropSquare(left, top, left + side, top + side)
+    }
+
+    private fun bandAt(y: Double, height: Int): VerticalBand = when {
+        y < height / 3.0 -> VerticalBand.TOP
+        y < height * 2.0 / 3.0 -> VerticalBand.MIDDLE
+        else -> VerticalBand.BOTTOM
+    }
+
+    /** A 10% trimmed mean prevents one bad optical-flow vector owning a band. */
+    private fun robustMeanAbsolute(values: List<Double>): Double {
+        if (values.isEmpty()) return 0.0
+        val sorted = values.map(::abs).filter { it.isFinite() }.sorted()
+        if (sorted.isEmpty()) return 0.0
+        val trim = if (sorted.size >= 10) sorted.size / 10 else 0
+        val kept = sorted.subList(trim, sorted.size - trim)
+        return kept.average()
+    }
+
+    private fun BandValues.sanitized() = BandValues(
+        top = top.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0,
+        middle = middle.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0,
+        bottom = bottom.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0
     )
-
-    private fun largestSquares(mask: ByteArray, width: Int, height: Int): LargestSquares {
-        var previous = IntArray(width + 1)
-        var bestSide = 0
-        val candidates = mutableListOf<CropSquare>()
-
-        for (y in 1..height) {
-            val current = IntArray(width + 1)
-            val rowOffset = (y - 1) * width
-            for (x in 1..width) {
-                if ((mask[rowOffset + x - 1].toInt() and 0xff) != 0) {
-                    current[x] = 1 + minOf(current[x - 1], previous[x], previous[x - 1])
-                    val side = current[x]
-                    when {
-                        side > bestSide -> {
-                            bestSide = side
-                            candidates.clear()
-                            candidates += CropSquare(x - side, y - side, x, y)
-                        }
-
-                        side == bestSide && side > 0 -> {
-                            candidates += CropSquare(x - side, y - side, x, y)
-                        }
-                    }
-                }
-            }
-            previous = current
-        }
-        return LargestSquares(bestSide, candidates)
-    }
-
-    /** Finds the valid square of an exact side whose center is nearest a target. */
-    private fun closestValidSquare(
-        mask: ByteArray,
-        width: Int,
-        height: Int,
-        side: Int,
-        targetX: Double,
-        targetY: Double
-    ): CropSquare? {
-        var previous = IntArray(width + 1)
-        var selected: CropSquare? = null
-        var selectedDistance = Double.POSITIVE_INFINITY
-
-        for (y in 1..height) {
-            val current = IntArray(width + 1)
-            val rowOffset = (y - 1) * width
-            for (x in 1..width) {
-                if ((mask[rowOffset + x - 1].toInt() and 0xff) != 0) {
-                    current[x] = 1 + minOf(current[x - 1], previous[x], previous[x - 1])
-                    if (current[x] >= side) {
-                        val square = CropSquare(x - side, y - side, x, y)
-                        val distance = centerDistanceSquared(square, targetX, targetY)
-                        if (distance < selectedDistance - SCORE_EPSILON) {
-                            selected = square
-                            selectedDistance = distance
-                        }
-                    }
-                }
-            }
-            previous = current
-        }
-        return selected
-    }
-
-    private fun centerDistanceSquared(square: CropSquare, x: Double, y: Double): Double {
-        val dx = (square.left + square.right) / 2.0 - x
-        val dy = (square.top + square.bottom) / 2.0 - y
-        return dx * dx + dy * dy
-    }
-
-    private data class WeightedEvidence(
-        val sample: ParallaxSample,
-        val weight: Double
-    )
-
-    /**
-     * Rejects a visually salient but stereo-stationary overlay.
-     *
-     * This matters for photographs shot through an aircraft window: the wing can
-     * be the strongest edge structure while the desired 3D content is the cloud
-     * field. A real foreground subject such as a guitar normally owns more
-     * relative-disparity evidence than its footprint would receive by chance.
-     */
-    private fun subjectHasParallaxSupport(
-        subject: SubjectGuidance,
-        evidence: List<WeightedEvidence>,
-        totalWeight: Double,
-        width: Int,
-        height: Int
-    ): Boolean {
-        if (evidence.isEmpty() || totalWeight <= SCORE_EPSILON) return true
-
-        val fallbackRadius = min(width, height) * 0.18
-        val radiusX = subject.radiusX.takeIf { it.isFinite() && it > 0.0 }
-            ?.times(1.45) ?: fallbackRadius
-        val radiusY = subject.radiusY.takeIf { it.isFinite() && it > 0.0 }
-            ?.times(1.45) ?: fallbackRadius
-        val localWeight = evidence.asSequence()
-            .filter {
-                val dx = (it.sample.x - subject.x) / radiusX
-                val dy = (it.sample.y - subject.y) / radiusY
-                dx * dx + dy * dy <= 1.0
-            }
-            .sumOf { it.weight }
-        val localShare = localWeight / totalWeight
-        val footprintShare = (
-            Math.PI * radiusX * radiusY / (width.toDouble() * height.toDouble())
-            ).coerceIn(0.01, 1.0)
-        val enrichment = localShare / footprintShare
-        return localShare >= MIN_SUBJECT_PARALLAX_SHARE &&
-            enrichment >= MIN_SUBJECT_PARALLAX_ENRICHMENT
-    }
-
-    private data class DisparityPlane(
-        val xSlope: Double,
-        val ySlope: Double,
-        val offset: Double
-    ) {
-        fun valueAt(x: Double, y: Double) = xSlope * x + ySlope * y + offset
-    }
-
-    /** Robustly removes the dominant background disparity plane. */
-    private fun relativeParallaxEvidence(
-        samples: List<ParallaxSample>,
-        width: Int,
-        height: Int
-    ): List<WeightedEvidence> {
-        if (samples.size < MIN_PARALLAX_SAMPLES) return emptyList()
-
-        val plane = fitDominantPlane(samples, width, height)
-        val residuals = samples.map { sample ->
-            abs(
-                sample.disparity - plane.valueAt(
-                    sample.x / width.coerceAtLeast(1),
-                    sample.y / height.coerceAtLeast(1)
-                )
-            )
-        }
-        val residualMedian = median(residuals)
-        val mad = median(residuals.map { abs(it - residualMedian) })
-        val noiseFloor = residualMedian + maxOf(0.75, 3.0 * 1.4826 * mad)
-        val positive = residuals.map { (it - noiseFloor).coerceAtLeast(0.0) }
-        val nonZero = positive.filter { it > 0.0 }.sorted()
-        if (nonZero.size < MIN_PARALLAX_SAMPLES) return emptyList()
-
-        val cap = percentile(nonZero, 0.90).coerceAtLeast(SCORE_EPSILON)
-        return samples.zip(positive)
-            .filter { (_, value) -> value > 0.0 }
-            .map { (sample, value) -> WeightedEvidence(sample, min(value, cap)) }
-    }
-
-    private fun fitDominantPlane(
-        samples: List<ParallaxSample>,
-        width: Int,
-        height: Int
-    ): DisparityPlane {
-        if (samples.size < 6) {
-            return DisparityPlane(0.0, 0.0, median(samples.map { it.disparity }))
-        }
-        var bestPlane = DisparityPlane(0.0, 0.0, median(samples.map { it.disparity }))
-        var bestMedian = planeResiduals(samples, bestPlane, width, height).let(::median)
-        var state = samples.size.toLong() * 2_654_435_761L + 1_013_904_223L
-
-        fun nextIndex(): Int {
-            state = (state * 1_664_525L + 1_013_904_223L) and 0xffff_ffffL
-            return (state % samples.size).toInt()
-        }
-
-        repeat(minOf(160, maxOf(64, samples.size * 2))) {
-            val first = nextIndex()
-            var second = nextIndex()
-            var third = nextIndex()
-            repeat(6) {
-                if (second == first) second = nextIndex()
-                if (third == first || third == second) third = nextIndex()
-            }
-            if (first == second || first == third || second == third) return@repeat
-
-            val candidate = solvePlane(
-                listOf(samples[first], samples[second], samples[third]),
-                width,
-                height
-            ) ?: return@repeat
-            val candidateMedian = median(planeResiduals(samples, candidate, width, height))
-            if (candidateMedian < bestMedian - SCORE_EPSILON) {
-                bestPlane = candidate
-                bestMedian = candidateMedian
-            }
-        }
-
-        repeat(2) {
-            val residuals = planeResiduals(samples, bestPlane, width, height)
-            val center = median(residuals)
-            val mad = median(residuals.map { abs(it - center) })
-            val inlierLimit = center + maxOf(0.75, 2.5 * 1.4826 * mad)
-            val inliers = samples.zip(residuals)
-                .filter { (_, residual) -> residual <= inlierLimit }
-                .map { (sample, _) -> sample }
-            solvePlane(inliers, width, height)?.let { bestPlane = it }
-        }
-        return bestPlane
-    }
-
-    private fun planeResiduals(
-        samples: List<ParallaxSample>,
-        plane: DisparityPlane,
-        width: Int,
-        height: Int
-    ): List<Double> = samples.map { sample ->
-        abs(
-            sample.disparity - plane.valueAt(
-                sample.x / width.coerceAtLeast(1),
-                sample.y / height.coerceAtLeast(1)
-            )
-        )
-    }
-
-    private fun solvePlane(
-        samples: List<ParallaxSample>,
-        width: Int,
-        height: Int
-    ): DisparityPlane? {
-        if (samples.size < 3) return null
-        var xx = 0.0
-        var xy = 0.0
-        var x1 = 0.0
-        var yy = 0.0
-        var y1 = 0.0
-        var xd = 0.0
-        var yd = 0.0
-        var d1 = 0.0
-
-        for (sample in samples) {
-            val x = sample.x / width.coerceAtLeast(1)
-            val y = sample.y / height.coerceAtLeast(1)
-            val d = sample.disparity
-            xx += x * x
-            xy += x * y
-            x1 += x
-            yy += y * y
-            y1 += y
-            xd += x * d
-            yd += y * d
-            d1 += d
-        }
-
-        val matrix = arrayOf(
-            doubleArrayOf(xx, xy, x1, xd),
-            doubleArrayOf(xy, yy, y1, yd),
-            doubleArrayOf(x1, y1, samples.size.toDouble(), d1)
-        )
-        if (!gaussianEliminate(matrix)) return null
-        return DisparityPlane(matrix[0][3], matrix[1][3], matrix[2][3])
-    }
-
-    private fun gaussianEliminate(matrix: Array<DoubleArray>): Boolean {
-        for (column in 0..2) {
-            var pivot = column
-            for (row in column + 1..2) {
-                if (abs(matrix[row][column]) > abs(matrix[pivot][column])) pivot = row
-            }
-            if (abs(matrix[pivot][column]) < 1e-10) return false
-            val swap = matrix[column]
-            matrix[column] = matrix[pivot]
-            matrix[pivot] = swap
-
-            val divisor = matrix[column][column]
-            for (index in column..3) matrix[column][index] /= divisor
-            for (row in 0..2) {
-                if (row == column) continue
-                val factor = matrix[row][column]
-                for (index in column..3) {
-                    matrix[row][index] -= factor * matrix[column][index]
-                }
-            }
-        }
-        return matrix.all { row -> row.all { it.isFinite() } }
-    }
-
-    private fun percentile(sortedValues: List<Double>, fraction: Double): Double {
-        if (sortedValues.isEmpty()) return 0.0
-        val index = ((sortedValues.size - 1) * fraction).toInt()
-        return sortedValues[index]
-    }
 
     fun outputSide(sourceSide: Int) = min(sourceSide, 2048)
 

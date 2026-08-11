@@ -2,20 +2,27 @@ package com.stereopairfinder
 
 import android.content.ContentResolver
 import com.stereopairfinder.data.SbsSaver
+import com.stereopairfinder.image.BandValues
 import com.stereopairfinder.image.CropSquare
 import com.stereopairfinder.image.Geometry
 import com.stereopairfinder.image.ParallaxSample
-import com.stereopairfinder.image.SubjectGuidance
-import com.stereopairfinder.image.SubjectCell
-import com.stereopairfinder.image.RegionalSubject
 import com.stereopairfinder.model.CameraFolderPolicy
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.Mockito.mock
 import java.time.Instant
 import java.util.UUID
 
 class PolicyAndOutputTest {
+    private val width = 100
+    private val height = 160
+    private val fullMask = ByteArray(width * height) { 1 }
+
     @Test
     fun `camera policy only accepts exact primary path`() {
         assertTrue(CameraFolderPolicy.accepts("external_primary", "DCIM/Camera/"))
@@ -40,288 +47,131 @@ class PolicyAndOutputTest {
         )
         assertEquals(2048, Geometry.outputSide(5000))
         assertEquals(640, Geometry.outputSide(640))
-        assertEquals(
-            2.0,
-            (Geometry.outputSide(5000) * 2).toDouble() / Geometry.outputSide(5000),
-            0.0
-        )
     }
 
     @Test
-    fun `largest valid square avoids invalid perspective corners`() {
-        val rows = listOf(
-            "11100",
-            "11100",
-            "11111",
-            "00111"
-        )
-        val mask = rows.joinToString("").map { if (it == '1') 1.toByte() else 0.toByte() }
-            .toByteArray()
-
-        assertEquals(
-            CropSquare(left = 0, top = 0, right = 3, bottom = 3),
-            Geometry.largestValidSquare(mask, width = 5, height = 4)
-        )
-        assertNull(Geometry.largestValidSquare(ByteArray(12), width = 4, height = 3))
-    }
-
-    @Test
-    fun `dominant background shift is removed and lower foreground is centered`() {
-        val mask = ByteArray(4 * 8) { 1 }
-        val background = listOf(
-            ParallaxSample(0.5, 0.5, 31.125),
-            ParallaxSample(1.5, 0.5, 33.125),
-            ParallaxSample(2.5, 0.5, 35.125),
-            ParallaxSample(3.5, 0.5, 37.125),
-            ParallaxSample(0.5, 2.5, 31.625),
-            ParallaxSample(1.5, 2.5, 33.625),
-            ParallaxSample(2.5, 2.5, 35.625),
-            ParallaxSample(3.5, 2.5, 37.625),
-            ParallaxSample(0.5, 4.0, 32.0),
-            ParallaxSample(3.5, 4.0, 38.0)
-        )
-        val lowerForeground = listOf(
-            ParallaxSample(1.2, 6.2, 21.95),
-            ParallaxSample(2.0, 6.7, 23.42),
-            ParallaxSample(2.8, 7.2, 24.90),
-            ParallaxSample(2.2, 7.6, 23.60)
-        )
-
-        assertEquals(
-            CropSquare(left = 1, top = 5, right = 4, bottom = 8),
-            Geometry.largestValidSquare(
-                mask,
-                width = 4,
-                height = 8,
-                parallaxSamples = background + lowerForeground
-            )
-        )
-    }
-
-    @Test
-    fun `movable crop escapes a unique largest square and reaches lower foreground`() {
-        val rows = List(6) { "111111" } + List(4) { "011111" }
-        val mask = rows.joinToString("").map { if (it == '1') 1.toByte() else 0.toByte() }
-            .toByteArray()
-        val background = listOf(
-            ParallaxSample(0.5, 0.5, 20.0),
-            ParallaxSample(2.5, 0.5, 21.0),
-            ParallaxSample(4.5, 0.5, 22.0),
-            ParallaxSample(0.5, 2.5, 20.5),
-            ParallaxSample(2.5, 2.5, 21.5),
-            ParallaxSample(4.5, 2.5, 22.5),
-            ParallaxSample(0.5, 4.5, 21.0),
-            ParallaxSample(4.5, 4.5, 23.0)
-        )
-        val lowerForeground = listOf(
-            ParallaxSample(2.0, 8.0, 8.0),
-            ParallaxSample(3.0, 8.5, 8.5),
-            ParallaxSample(4.0, 9.0, 9.0),
-            ParallaxSample(3.5, 9.5, 8.8)
-        )
-
-        assertEquals(
-            CropSquare(left = 1, top = 5, right = 6, bottom = 10),
-            Geometry.largestValidSquare(
-                mask,
-                width = 6,
-                height = 10,
-                parallaxSamples = background + lowerForeground
-            )
-        )
-    }
-
-    @Test
-    fun `an affine background disparity alone keeps the largest centered crop`() {
-        val mask = ByteArray(4 * 8) { 1 }
-        val background = (0 until 4).flatMap { y ->
-            (0 until 4).map { x ->
-                ParallaxSample(
-                    x = x + 0.5,
-                    y = y * 2.0 + 0.5,
-                    disparity = 30.0 + 2.0 * (x + 0.5) + 0.25 * (y * 2.0 + 0.5)
-                )
-            }
-        }
-
-        assertEquals(
-            CropSquare(left = 0, top = 2, right = 4, bottom = 6),
-            Geometry.largestValidSquare(mask, width = 4, height = 8, parallaxSamples = background)
-        )
-    }
-
-    @Test
-    fun `largest valid square falls back to the image center without parallax`() {
-        val mask = ByteArray(4 * 6) { 1 }
-
-        assertEquals(
-            CropSquare(left = 0, top = 1, right = 4, bottom = 5),
-            Geometry.largestValidSquare(mask, width = 4, height = 6)
-        )
-    }
-
-    @Test
-    fun `a clear visual subject recenters without parallax and without extra crop`() {
-        val mask = ByteArray(10 * 16) { 1 }
-        val decision = Geometry.adaptiveValidSquare(
-            mask = mask,
-            width = 10,
-            height = 16,
-            subject = SubjectGuidance(
-                x = 5.0,
-                y = 10.0,
-                confidence = 0.90,
-                evidenceCount = 240
-            )
+    fun `lower parallax keeps the bottom and crops only the top`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 1.0, middle = 1.2, bottom = 5.0),
+            BandValues(top = 20.0, middle = 20.0, bottom = 20.0)
         )
 
         assertNotNull(decision)
-        assertEquals(CropSquare(0, 5, 10, 15), decision!!.square)
-        assertEquals("uyarlanabilir: belirgin konu", decision.mode)
+        assertEquals(CropSquare(0, 60, 100, 160), decision!!.square)
+        assertTrue(decision.mode.startsWith("üstten kırp"))
     }
 
     @Test
-    fun `adaptive framing uses the largest side that unlocks subject movement`() {
-        val width = 100
-        val height = 160
-        val mask = ByteArray(width * height) { index ->
-            val x = index % width
-            val y = index / width
-            if (y < 100 || x > 0) 1 else 0
-        }
-        val decision = Geometry.adaptiveValidSquare(
-            mask = mask,
-            width = width,
-            height = height,
-            subject = SubjectGuidance(
-                x = 50.0,
-                y = 120.0,
-                confidence = 0.92,
-                evidenceCount = 400
+    fun `upper parallax keeps the top and crops only the bottom`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 6.0, middle = 1.0, bottom = 1.1),
+            BandValues(top = 20.0, middle = 20.0, bottom = 20.0)
+        )
+
+        assertEquals(CropSquare(0, 0, 100, 100), decision!!.square)
+        assertTrue(decision.mode.startsWith("alttan kırp"))
+    }
+
+    @Test
+    fun `middle parallax crops top and bottom equally`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 1.0, middle = 5.0, bottom = 1.0),
+            BandValues(top = 20.0, middle = 20.0, bottom = 20.0)
+        )
+
+        assertEquals(CropSquare(0, 30, 100, 130), decision!!.square)
+        assertTrue(decision.mode.startsWith("merkezden kırp"))
+    }
+
+    @Test
+    fun `similar parallax values use a centered crop`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 3.0, middle = 3.2, bottom = 3.1),
+            BandValues(top = 15.0, middle = 16.0, bottom = 16.0)
+        )
+
+        assertEquals(CropSquare(0, 30, 100, 130), decision!!.square)
+        assertEquals("merkezden kırp · fark belirgin değil", decision.mode)
+    }
+
+    @Test
+    fun `flat sky at the top is cropped when parallax is indecisive`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 2.0, middle = 2.1, bottom = 2.0),
+            BandValues(top = 5.0, middle = 18.0, bottom = 28.0)
+        )
+
+        assertEquals(CropSquare(0, 60, 100, 160), decision!!.square)
+        assertEquals("üstten kırp · üst bölge daha tekdüze", decision.mode)
+    }
+
+    @Test
+    fun `flat area at the bottom is cropped when parallax is indecisive`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 2.0, middle = 2.1, bottom = 2.0),
+            BandValues(top = 30.0, middle = 18.0, bottom = 4.0)
+        )
+
+        assertEquals(CropSquare(0, 0, 100, 100), decision!!.square)
+        assertEquals("alttan kırp · alt bölge daha tekdüze", decision.mode)
+    }
+
+    @Test
+    fun `clear parallax wins over an opposing flat-area suggestion`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 1.0, middle = 1.0, bottom = 7.0),
+            BandValues(top = 35.0, middle = 20.0, bottom = 3.0)
+        )
+
+        assertEquals(CropSquare(0, 60, 100, 160), decision!!.square)
+        assertEquals("üstten kırp · alt paralaks güçlü", decision.mode)
+    }
+
+    @Test
+    fun `portrait crop preserves the complete image width`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            emptyList(),
+            BandValues(top = 20.0, middle = 20.0, bottom = 20.0)
+        )
+
+        assertEquals(0, decision!!.square.left)
+        assertEquals(width, decision.square.right)
+        assertEquals(width, decision.square.width)
+    }
+
+    @Test
+    fun `an empty common mask has no crop`() {
+        assertNull(
+            Geometry.verticalCrop(
+                ByteArray(width * height),
+                width,
+                height
             )
         )
-
-        assertNotNull(decision)
-        assertEquals(99, decision!!.square.width)
-        assertTrue((decision.square.top + decision.square.bottom) / 2.0 > 105.0)
-    }
-
-    @Test
-    fun `guitar-like clear subject owns framing when depth supports its region`() {
-        val width = 100
-        val height = 160
-        val mask = ByteArray(width * height) { 1 }
-        val background = (0 until 5).flatMap { row ->
-            (0 until 5).map { column ->
-                val x = column * 20.0 + 10.0
-                val y = row * 24.0 + 10.0
-                ParallaxSample(x, y, 20.0 + 0.02 * x + 0.01 * y)
-            }
-        }
-        val guitarDepth = listOf(
-            ParallaxSample(18.0, 112.0, 7.0),
-            ParallaxSample(24.0, 120.0, 7.5),
-            ParallaxSample(30.0, 128.0, 8.0),
-            ParallaxSample(34.0, 136.0, 8.4),
-            ParallaxSample(26.0, 144.0, 7.8)
-        )
-
-        val decision = Geometry.adaptiveValidSquare(
-            mask = mask,
-            width = width,
-            height = height,
-            parallaxSamples = background + guitarDepth,
-            subject = SubjectGuidance(
-                x = 27.0,
-                y = 128.0,
-                confidence = 0.90,
-                evidenceCount = 600,
-                radiusX = 18.0,
-                radiusY = 30.0
-            )
-        )
-
-        assertNotNull(decision)
-        assertEquals("uyarlanabilir: belirgin konu", decision!!.mode)
-        assertEquals(27.0, decision.targetX, 0.0)
-        assertEquals(128.0, decision.targetY, 0.0)
-    }
-
-    @Test
-    fun `aircraft-like stationary wing is rejected and cloud depth owns framing`() {
-        val width = 100
-        val height = 160
-        val mask = ByteArray(width * height) { 1 }
-        val background = (0 until 5).flatMap { row ->
-            (0 until 5).map { column ->
-                val x = column * 20.0 + 10.0
-                val y = row * 20.0 + 10.0
-                ParallaxSample(x, y, 18.0 + 0.015 * x + 0.01 * y)
-            }
-        }
-        val cloudDepth = listOf(
-            ParallaxSample(35.0, 118.0, 8.0),
-            ParallaxSample(45.0, 126.0, 8.4),
-            ParallaxSample(55.0, 134.0, 8.1),
-            ParallaxSample(65.0, 142.0, 8.6),
-            ParallaxSample(50.0, 150.0, 8.2)
-        )
-
-        val decision = Geometry.adaptiveValidSquare(
-            mask = mask,
-            width = width,
-            height = height,
-            parallaxSamples = background + cloudDepth,
-            subject = SubjectGuidance(
-                x = 78.0,
-                y = 62.0,
-                confidence = 0.92,
-                evidenceCount = 800,
-                radiusX = 24.0,
-                radiusY = 12.0
-            )
-        )
-
-        assertNotNull(decision)
-        assertEquals("uyarlanabilir: paralaks (sabit konu elendi)", decision!!.mode)
-        assertTrue(decision.targetY > 115.0)
-        assertTrue(decision.targetX in 35.0..65.0)
-    }
-
-    @Test
-    fun `regional analysis joins an elongated lower-left subject`() {
-        val cells = (0 until 12).flatMap { row ->
-            (0 until 8).map { column ->
-                val isSubject = column in 1..2 && row in 7..10
-                SubjectCell(
-                    column = column,
-                    row = row,
-                    centerX = column * 10.0 + 5.0,
-                    centerY = row * 10.0 + 5.0,
-                    validPixels = 100,
-                    score = if (isSubject) 58.0 else 5.0 + (column + row) % 3
-                )
-            }
-        }
-
-        val subject = RegionalSubject.select(cells)
-
-        assertNotNull(subject)
-        assertTrue(subject!!.confidence >= 0.35)
-        assertTrue(subject.x < 30.0)
-        assertTrue(subject.y > 70.0)
-        assertEquals(800, subject.evidenceCount)
-    }
-
-    @Test
-    fun `regional analysis rejects a uniformly detailed scene`() {
-        val cells = (0 until 10).flatMap { row ->
-            (0 until 10).map { column ->
-                SubjectCell(column, row, column * 10.0, row * 10.0, 100, 8.0)
-            }
-        }
-
-        assertNull(RegionalSubject.select(cells))
     }
 
     @Test
@@ -332,6 +182,19 @@ class PolicyAndOutputTest {
             Geometry.saneHomography(
                 doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, Double.NaN)
             )
+        )
+    }
+
+    private fun samples(top: Double, middle: Double, bottom: Double): List<ParallaxSample> =
+        bandSamples(y = 15.0, disparity = top) +
+            bandSamples(y = 75.0, disparity = middle) +
+            bandSamples(y = 140.0, disparity = bottom)
+
+    private fun bandSamples(y: Double, disparity: Double) = (0 until 8).map { index ->
+        ParallaxSample(
+            x = 10.0 + index * 10.0,
+            y = y + (index % 2),
+            disparity = disparity + (index % 3 - 1) * 0.04
         )
     }
 }

@@ -102,9 +102,9 @@ class StereoAnalyzer {
         var cropCenterYPercent: Double? = null
         var cropSidePercent: Double? = null
         var parallaxEvidenceCount = 0
-        var framingMode = "merkez / en büyük kare"
-        var subjectConfidence = 0.0
-        var subjectEvidenceCount = 0
+        var framingMode = "merkezden kırp"
+        var parallaxBands: BandValues? = null
+        var uniformityBands: BandValues? = null
 
         if (evidence && !fundamental.empty()) {
             val inL = MatOfPoint2f()
@@ -189,27 +189,27 @@ class StereoAnalyzer {
                 val denseSamples = runCatching {
                     denseParallaxSamples(rectifiedGrayL, rectifiedGrayR, common)
                 }.getOrDefault(emptyList())
-                val subject = runCatching {
-                    visualSubjectGuidance(rectifiedGrayL, rectifiedGrayR, common)
+                val uniformity = runCatching {
+                    verticalUniformity(rectifiedGrayL, rectifiedGrayR, common)
                 }.getOrNull()
                 rectifiedGrayL.release()
                 rectifiedGrayR.release()
 
                 val parallaxSamples = if (denseSamples.size >= 12) denseSamples else featureSamples
                 parallaxEvidenceCount = parallaxSamples.size
-                val framing = Geometry.adaptiveValidSquare(
+                val framing = Geometry.verticalCrop(
                     validPixels,
                     targetW,
                     targetH,
                     parallaxSamples,
-                    subject
+                    uniformity
                 )
                 val square = framing?.square
 
                 if (square != null) {
                     framingMode = framing.mode
-                    subjectConfidence = framing.subjectConfidence
-                    subjectEvidenceCount = framing.subjectEvidenceCount
+                    parallaxBands = framing.parallax
+                    uniformityBands = framing.uniformity
                     cropCenterXPercent = 100.0 * (square.left + square.right) / 2.0 / targetW
                     cropCenterYPercent = 100.0 * (square.top + square.bottom) / 2.0 / targetH
                     cropSidePercent = 100.0 * square.width / min(targetW, targetH)
@@ -288,98 +288,48 @@ class StereoAnalyzer {
             cropSidePercent = cropSidePercent,
             parallaxEvidenceCount = parallaxEvidenceCount,
             framingMode = framingMode,
-            subjectConfidence = subjectConfidence,
-            subjectEvidenceCount = subjectEvidenceCount
+            parallaxBands = parallaxBands,
+            uniformityBands = uniformityBands
         )
     }
 
     /**
-     * Finds a visually distinct subject without using disparity. The image is
-     * divided into regions, then local contrast, edges and fine texture are
-     * measured per region. RegionalSubject joins neighbouring detailed cells so
-     * elongated subjects survive without requiring one solid pixel component.
+     * Measures how varied each broad horizontal band is. Standard deviation is
+     * intentionally used instead of object recognition: a blue sky or plain wall
+     * receives a small value and is therefore a good fallback place to crop.
      */
-    private fun visualSubjectGuidance(
+    private fun verticalUniformity(
         grayL: Mat,
         grayR: Mat,
         commonMask: Mat
-    ): SubjectGuidance? {
-        val maxDimension = max(grayL.cols(), grayL.rows())
-        if (maxDimension <= 0) return null
-        val scale = min(1.0, 540.0 / maxDimension)
-        val size = Size(
-            max(1, (grayL.cols() * scale).roundToInt()).toDouble(),
-            max(1, (grayL.rows() * scale).roundToInt()).toDouble()
-        )
-        val left = Mat()
-        val right = Mat()
-        val mask = Mat()
-        Imgproc.resize(grayL, left, size, 0.0, 0.0, Imgproc.INTER_AREA)
-        Imgproc.resize(grayR, right, size, 0.0, 0.0, Imgproc.INTER_AREA)
-        Imgproc.resize(commonMask, mask, size, 0.0, 0.0, Imgproc.INTER_NEAREST)
-
+    ): BandValues {
         val average = Mat()
-        Core.addWeighted(left, 0.5, right, 0.5, 0.0, average)
-        val broad = Mat()
-        Imgproc.GaussianBlur(average, broad, Size(0.0, 0.0), 11.0)
-        val residual = Mat()
-        Core.absdiff(average, broad, residual)
+        Core.addWeighted(grayL, 0.5, grayR, 0.5, 0.0, average)
 
-        val gx = Mat()
-        val gy = Mat()
-        Imgproc.Sobel(average, gx, CvType.CV_32F, 1, 0, 3)
-        Imgproc.Sobel(average, gy, CvType.CV_32F, 0, 1, 3)
-        val gradient = Mat()
-        Core.magnitude(gx, gy, gradient)
-        val shortSide = min(average.cols(), average.rows())
-        val cellSide = max(12, shortSide / 18)
-        val cells = mutableListOf<SubjectCell>()
-        var row = 0
-        for (top in 0 until average.rows() step cellSide) {
-            var column = 0
-            for (leftX in 0 until average.cols() step cellSide) {
-                val cellWidth = min(cellSide, average.cols() - leftX)
-                val cellHeight = min(cellSide, average.rows() - top)
-                val rect = Rect(leftX, top, cellWidth, cellHeight)
-                val cellMask = mask.submat(rect)
-                val validPixels = Core.countNonZero(cellMask)
-                if (validPixels >= cellWidth * cellHeight * 0.65) {
-                    val mean = MatOfDouble()
-                    val deviation = MatOfDouble()
-                    val imageCell = average.submat(rect)
-                    Core.meanStdDev(imageCell, mean, deviation, cellMask)
-                    val localContrast = deviation.toArray().firstOrNull() ?: 0.0
-                    val gradientCell = gradient.submat(rect)
-                    val residualCell = residual.submat(rect)
-                    val gradientMean = Core.mean(gradientCell, cellMask).`val`[0]
-                    val residualMean = Core.mean(residualCell, cellMask).`val`[0]
-                    val score =
-                        0.44 * localContrast +
-                            0.34 * (gradientMean / 4.0) +
-                            0.22 * residualMean
-                    cells += SubjectCell(
-                        column = column,
-                        row = row,
-                        centerX = (leftX + cellWidth / 2.0) / scale,
-                        centerY = (top + cellHeight / 2.0) / scale,
-                        validPixels = validPixels,
-                        score = score
-                    )
-                    imageCell.release()
-                    gradientCell.release()
-                    residualCell.release()
-                    mean.release()
-                    deviation.release()
-                }
-                cellMask.release()
-                column++
-            }
-            row++
+        fun deviation(top: Int, bottom: Int): Double {
+            if (bottom <= top) return 0.0
+            val rect = Rect(0, top, average.cols(), bottom - top)
+            val imageBand = average.submat(rect)
+            val maskBand = commonMask.submat(rect)
+            val mean = MatOfDouble()
+            val stddev = MatOfDouble()
+            Core.meanStdDev(imageBand, mean, stddev, maskBand)
+            val value = stddev.toArray().firstOrNull() ?: 0.0
+            imageBand.release()
+            maskBand.release()
+            mean.release()
+            stddev.release()
+            return value
         }
 
-        val result = RegionalSubject.select(cells)
-        listOf(left, right, mask, average, broad, residual, gx, gy, gradient)
-            .forEach { it.release() }
+        val first = average.rows() / 3
+        val second = average.rows() * 2 / 3
+        val result = BandValues(
+            top = deviation(0, first),
+            middle = deviation(first, second),
+            bottom = deviation(second, average.rows())
+        )
+        average.release()
         return result
     }
 
