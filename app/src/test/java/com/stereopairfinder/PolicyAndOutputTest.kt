@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import com.stereopairfinder.data.SbsSaver
 import com.stereopairfinder.image.CropSquare
 import com.stereopairfinder.image.Geometry
+import com.stereopairfinder.image.ParallaxSample
 import com.stereopairfinder.model.CameraFolderPolicy
 import org.junit.Assert.*
 import org.junit.Test
@@ -59,6 +60,31 @@ class PolicyAndOutputTest {
             Geometry.largestValidSquare(mask, width = 5, height = 4)
         )
         assertNull(Geometry.largestValidSquare(ByteArray(12), width = 4, height = 3))
+    }
+
+    @Test
+    fun `largest valid square prefers the region with stronger parallax`() {
+        val mask = ByteArray(4 * 6) { 1 }
+        val samples = listOf(
+            ParallaxSample(x = 1.0, y = 1.0, disparity = 1.0),
+            ParallaxSample(x = 1.5, y = 5.2, disparity = 12.0),
+            ParallaxSample(x = 2.5, y = 4.8, disparity = 8.0)
+        )
+
+        assertEquals(
+            CropSquare(left = 0, top = 2, right = 4, bottom = 6),
+            Geometry.largestValidSquare(mask, width = 4, height = 6, parallaxSamples = samples)
+        )
+    }
+
+    @Test
+    fun `largest valid square falls back to the image center without parallax`() {
+        val mask = ByteArray(4 * 6) { 1 }
+
+        assertEquals(
+            CropSquare(left = 0, top = 1, right = 4, bottom = 5),
+            Geometry.largestValidSquare(mask, width = 4, height = 6)
+        )
     }
 
     @Test
