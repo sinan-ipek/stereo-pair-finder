@@ -182,9 +182,10 @@ object Geometry {
     }
 
     /**
-     * Fits disparity = a*x + b*y + c, repeatedly keeping the 70% closest
-     * samples. The dominant wall/background therefore defines the baseline,
-     * while foreground objects remain residual evidence.
+     * Fits disparity = a*x + b*y + c with deterministic RANSAC. A least-squares
+     * seed can be pulled toward the foreground and then keep reinforcing the
+     * wrong plane; three-point hypotheses avoid that failure. The model with
+     * the smallest median residual is refined using only its robust inliers.
      */
     private fun fitDominantPlane(
         samples: List<ParallaxSample>,
@@ -194,25 +195,62 @@ object Geometry {
         if (samples.size < 6) {
             return DisparityPlane(0.0, 0.0, median(samples.map { it.disparity }))
         }
-        var retained = samples
-        var plane = DisparityPlane(0.0, 0.0, median(samples.map { it.disparity }))
+        var bestPlane = DisparityPlane(0.0, 0.0, median(samples.map { it.disparity }))
+        var bestMedian = planeResiduals(samples, bestPlane, width, height).let(::median)
+        var state = samples.size.toLong() * 2_654_435_761L + 1_013_904_223L
 
-        repeat(4) {
-            solvePlane(retained, width, height)?.let { plane = it }
-            if (samples.size < 6) return@repeat
-            val keepCount = maxOf(3, (samples.size * 0.70).toInt())
-            retained = samples
-                .sortedBy { sample ->
-                    abs(
-                        sample.disparity - plane.valueAt(
-                            sample.x / width.coerceAtLeast(1),
-                            sample.y / height.coerceAtLeast(1)
-                        )
-                    )
-                }
-                .take(keepCount)
+        fun nextIndex(): Int {
+            state = (state * 1_664_525L + 1_013_904_223L) and 0xffff_ffffL
+            return (state % samples.size).toInt()
         }
-        return solvePlane(retained, width, height) ?: plane
+
+        repeat(minOf(160, maxOf(64, samples.size * 2))) {
+            val first = nextIndex()
+            var second = nextIndex()
+            var third = nextIndex()
+            repeat(6) {
+                if (second == first) second = nextIndex()
+                if (third == first || third == second) third = nextIndex()
+            }
+            if (first == second || first == third || second == third) return@repeat
+
+            val candidate = solvePlane(
+                listOf(samples[first], samples[second], samples[third]),
+                width,
+                height
+            ) ?: return@repeat
+            val candidateMedian = median(planeResiduals(samples, candidate, width, height))
+            if (candidateMedian < bestMedian - SCORE_EPSILON) {
+                bestPlane = candidate
+                bestMedian = candidateMedian
+            }
+        }
+
+        repeat(2) {
+            val residuals = planeResiduals(samples, bestPlane, width, height)
+            val center = median(residuals)
+            val mad = median(residuals.map { abs(it - center) })
+            val inlierLimit = center + maxOf(0.75, 2.5 * 1.4826 * mad)
+            val inliers = samples.zip(residuals)
+                .filter { (_, residual) -> residual <= inlierLimit }
+                .map { (sample, _) -> sample }
+            solvePlane(inliers, width, height)?.let { bestPlane = it }
+        }
+        return bestPlane
+    }
+
+    private fun planeResiduals(
+        samples: List<ParallaxSample>,
+        plane: DisparityPlane,
+        width: Int,
+        height: Int
+    ): List<Double> = samples.map { sample ->
+        abs(
+            sample.disparity - plane.valueAt(
+                sample.x / width.coerceAtLeast(1),
+                sample.y / height.coerceAtLeast(1)
+            )
+        )
     }
 
     private fun solvePlane(
