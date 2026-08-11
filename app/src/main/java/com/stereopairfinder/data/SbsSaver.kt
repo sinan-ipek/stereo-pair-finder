@@ -11,28 +11,44 @@ import java.util.UUID
 
 class SbsSaver(private val resolver: ContentResolver) {
     data class Saved(val name: String, val location: String = OUTPUT_PATH)
-    fun uniqueName(now: Instant = Instant.now(), uuid: UUID = UUID.randomUUID()): String =
-        "SBS_${DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS").withZone(ZoneOffset.UTC).format(now)}_${uuid}.jpg"
+
+    fun uniqueName(
+        now: Instant = Instant.now(),
+        uuid: UUID = UUID.randomUUID()
+    ): String = "SBS_${STAMP.format(now)}_$uuid.jpg"
 
     fun save(bitmap: Bitmap): Saved {
-        val name=uniqueName()
-        val values=ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME,name); put(MediaStore.Images.Media.MIME_TYPE,"image/jpeg")
-            put(MediaStore.Images.Media.RELATIVE_PATH,OUTPUT_PATH); put(MediaStore.Images.Media.IS_PENDING,1)
+        val name = uniqueName()
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, name)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.RELATIVE_PATH, OUTPUT_PATH)
+            put(MediaStore.Images.Media.IS_PENDING, 1)
         }
-        val outputUri=resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,values)
+        val outputUri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             ?: error("MediaStore yeni çıktı kaydı oluşturamadı")
         try {
-            resolver.openOutputStream(outputUri,"w")!!.use { stream ->
-                check(bitmap.compress(Bitmap.CompressFormat.JPEG,95,stream)) { "JPEG kodlanamadı" }
+            resolver.openOutputStream(outputUri, "w")!!.use { stream ->
+                check(bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)) {
+                    "JPEG kodlanamadı"
+                }
             }
-            resolver.update(outputUri,ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING,0) },null,null)
+            resolver.update(
+                outputUri,
+                ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) },
+                null,
+                null
+            )
             return Saved(name)
         } catch (failure: Throwable) {
-            // outputUri bu metodun hemen yukarıdaki insert çağrısında oluşturduğu yeni, yarım çıktıdır.
-            resolver.delete(outputUri,null,null)
+            resolver.delete(outputUri, null, null)
             throw failure
         }
     }
-    companion object { const val OUTPUT_PATH="Pictures/Stereo SBS Test/" }
+
+    companion object {
+        const val OUTPUT_PATH = "Pictures/Stereo SBS Test/"
+        private val STAMP = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS")
+            .withZone(ZoneOffset.UTC)
+    }
 }

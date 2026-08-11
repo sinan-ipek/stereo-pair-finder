@@ -3,4 +3,3 @@ local.properties
 **/build/
 *.iml
 .idea/
-gradle/wrapper/gradle-wrapper.jar
