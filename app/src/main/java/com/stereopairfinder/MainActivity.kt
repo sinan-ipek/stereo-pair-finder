@@ -24,6 +24,7 @@ import java.time.format.DateTimeFormatter
 
 class MainActivity:ComponentActivity(){override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState);setContent{MaterialTheme{Screen()}}}}
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable fun Screen(vm:MainViewModel= viewModel()) {
     val s by vm.state.collectAsStateWithLifecycle(); val picker=rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(50)){vm.select(it)}
     Scaffold(topBar={TopAppBar(title={Text("Stereo Pair Finder")})}){pad->LazyColumn(Modifier.padding(pad).padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){

@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "com.stereopairfinder"
     compileSdk = 35
+
     defaultConfig {
         applicationId = "com.stereopairfinder"
         minSdk = 29
@@ -15,9 +16,28 @@ android {
         versionName = "1.0-test"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
-    buildFeatures { compose = true; buildConfig = true }
-    packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
-    testOptions { unitTests.isReturnDefaultValues = true }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+
+    packaging {
+        resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+}
+
+kotlin {
+    jvmToolchain(17)
 }
 
 dependencies {
@@ -32,7 +52,9 @@ dependencies {
     implementation("androidx.exifinterface:exifinterface:1.4.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.opencv:opencv:4.10.0")
+
     debugImplementation("androidx.compose.ui:ui-tooling:1.7.8")
+
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.mockito:mockito-core:5.15.2")
 }
