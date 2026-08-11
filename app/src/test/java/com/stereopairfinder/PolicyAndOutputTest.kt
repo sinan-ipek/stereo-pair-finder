@@ -6,6 +6,8 @@ import com.stereopairfinder.image.CropSquare
 import com.stereopairfinder.image.Geometry
 import com.stereopairfinder.image.ParallaxSample
 import com.stereopairfinder.image.SubjectGuidance
+import com.stereopairfinder.image.SubjectCell
+import com.stereopairfinder.image.RegionalSubject
 import com.stereopairfinder.model.CameraFolderPolicy
 import org.junit.Assert.*
 import org.junit.Test
@@ -202,6 +204,124 @@ class PolicyAndOutputTest {
         assertNotNull(decision)
         assertEquals(99, decision!!.square.width)
         assertTrue((decision.square.top + decision.square.bottom) / 2.0 > 105.0)
+    }
+
+    @Test
+    fun `guitar-like clear subject owns framing when depth supports its region`() {
+        val width = 100
+        val height = 160
+        val mask = ByteArray(width * height) { 1 }
+        val background = (0 until 5).flatMap { row ->
+            (0 until 5).map { column ->
+                val x = column * 20.0 + 10.0
+                val y = row * 24.0 + 10.0
+                ParallaxSample(x, y, 20.0 + 0.02 * x + 0.01 * y)
+            }
+        }
+        val guitarDepth = listOf(
+            ParallaxSample(18.0, 112.0, 7.0),
+            ParallaxSample(24.0, 120.0, 7.5),
+            ParallaxSample(30.0, 128.0, 8.0),
+            ParallaxSample(34.0, 136.0, 8.4),
+            ParallaxSample(26.0, 144.0, 7.8)
+        )
+
+        val decision = Geometry.adaptiveValidSquare(
+            mask = mask,
+            width = width,
+            height = height,
+            parallaxSamples = background + guitarDepth,
+            subject = SubjectGuidance(
+                x = 27.0,
+                y = 128.0,
+                confidence = 0.90,
+                evidenceCount = 600,
+                radiusX = 18.0,
+                radiusY = 30.0
+            )
+        )
+
+        assertNotNull(decision)
+        assertEquals("uyarlanabilir: belirgin konu", decision!!.mode)
+        assertEquals(27.0, decision.targetX, 0.0)
+        assertEquals(128.0, decision.targetY, 0.0)
+    }
+
+    @Test
+    fun `aircraft-like stationary wing is rejected and cloud depth owns framing`() {
+        val width = 100
+        val height = 160
+        val mask = ByteArray(width * height) { 1 }
+        val background = (0 until 5).flatMap { row ->
+            (0 until 5).map { column ->
+                val x = column * 20.0 + 10.0
+                val y = row * 20.0 + 10.0
+                ParallaxSample(x, y, 18.0 + 0.015 * x + 0.01 * y)
+            }
+        }
+        val cloudDepth = listOf(
+            ParallaxSample(35.0, 118.0, 8.0),
+            ParallaxSample(45.0, 126.0, 8.4),
+            ParallaxSample(55.0, 134.0, 8.1),
+            ParallaxSample(65.0, 142.0, 8.6),
+            ParallaxSample(50.0, 150.0, 8.2)
+        )
+
+        val decision = Geometry.adaptiveValidSquare(
+            mask = mask,
+            width = width,
+            height = height,
+            parallaxSamples = background + cloudDepth,
+            subject = SubjectGuidance(
+                x = 78.0,
+                y = 62.0,
+                confidence = 0.92,
+                evidenceCount = 800,
+                radiusX = 24.0,
+                radiusY = 12.0
+            )
+        )
+
+        assertNotNull(decision)
+        assertEquals("uyarlanabilir: paralaks (sabit konu elendi)", decision!!.mode)
+        assertTrue(decision.targetY > 115.0)
+        assertTrue(decision.targetX in 35.0..65.0)
+    }
+
+    @Test
+    fun `regional analysis joins an elongated lower-left subject`() {
+        val cells = (0 until 12).flatMap { row ->
+            (0 until 8).map { column ->
+                val isSubject = column in 1..2 && row in 7..10
+                SubjectCell(
+                    column = column,
+                    row = row,
+                    centerX = column * 10.0 + 5.0,
+                    centerY = row * 10.0 + 5.0,
+                    validPixels = 100,
+                    score = if (isSubject) 58.0 else 5.0 + (column + row) % 3
+                )
+            }
+        }
+
+        val subject = RegionalSubject.select(cells)
+
+        assertNotNull(subject)
+        assertTrue(subject!!.confidence >= 0.35)
+        assertTrue(subject.x < 30.0)
+        assertTrue(subject.y > 70.0)
+        assertEquals(800, subject.evidenceCount)
+    }
+
+    @Test
+    fun `regional analysis rejects a uniformly detailed scene`() {
+        val cells = (0 until 10).flatMap { row ->
+            (0 until 10).map { column ->
+                SubjectCell(column, row, column * 10.0, row * 10.0, 100, 8.0)
+            }
+        }
+
+        assertNull(RegionalSubject.select(cells))
     }
 
     @Test

@@ -12,8 +12,8 @@ android {
         applicationId = "com.stereopairfinder"
         minSdk = 29
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.3-adaptive-framing"
+        versionCode = 6
+        versionName = "1.5-subject-or-parallax"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

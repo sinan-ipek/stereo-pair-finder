@@ -294,9 +294,10 @@ class StereoAnalyzer {
     }
 
     /**
-     * Finds a visually distinct subject without using disparity. Local tonal
-     * contrast and edges are measured in both rectified views, then compact hot
-     * regions are compared with the surrounding low-information background.
+     * Finds a visually distinct subject without using disparity. The image is
+     * divided into regions, then local contrast, edges and fine texture are
+     * measured per region. RegionalSubject joins neighbouring detailed cells so
+     * elongated subjects survive without requiring one solid pixel component.
      */
     private fun visualSubjectGuidance(
         grayL: Mat,
@@ -305,7 +306,7 @@ class StereoAnalyzer {
     ): SubjectGuidance? {
         val maxDimension = max(grayL.cols(), grayL.rows())
         if (maxDimension <= 0) return null
-        val scale = min(1.0, 480.0 / maxDimension)
+        val scale = min(1.0, 540.0 / maxDimension)
         val size = Size(
             max(1, (grayL.cols() * scale).roundToInt()).toDouble(),
             max(1, (grayL.rows() * scale).roundToInt()).toDouble()
@@ -320,9 +321,9 @@ class StereoAnalyzer {
         val average = Mat()
         Core.addWeighted(left, 0.5, right, 0.5, 0.0, average)
         val broad = Mat()
-        Imgproc.GaussianBlur(average, broad, Size(0.0, 0.0), 9.0)
-        val contrast = Mat()
-        Core.absdiff(average, broad, contrast)
+        Imgproc.GaussianBlur(average, broad, Size(0.0, 0.0), 11.0)
+        val residual = Mat()
+        Core.absdiff(average, broad, residual)
 
         val gx = Mat()
         val gy = Mat()
@@ -330,124 +331,56 @@ class StereoAnalyzer {
         Imgproc.Sobel(average, gy, CvType.CV_32F, 0, 1, 3)
         val gradient = Mat()
         Core.magnitude(gx, gy, gradient)
-        val contrast32 = Mat()
-        contrast.convertTo(contrast32, CvType.CV_32F)
-        Core.normalize(contrast32, contrast32, 0.0, 255.0, Core.NORM_MINMAX)
-        Core.normalize(gradient, gradient, 0.0, 255.0, Core.NORM_MINMAX)
-
-        val saliency32 = Mat()
-        Core.addWeighted(contrast32, 0.68, gradient, 0.32, 0.0, saliency32)
-        Imgproc.GaussianBlur(saliency32, saliency32, Size(7.0, 7.0), 1.6)
-        val saliency = Mat()
-        saliency32.convertTo(saliency, CvType.CV_8U)
-        Core.bitwise_and(saliency, mask, saliency)
-
-        val scoreBytes = ByteArray(saliency.rows() * saliency.cols())
-        val maskBytes = ByteArray(mask.rows() * mask.cols())
-        saliency.get(0, 0, scoreBytes)
-        mask.get(0, 0, maskBytes)
-        val validScores = scoreBytes.indices
-            .filter { (maskBytes[it].toInt() and 0xff) != 0 }
-            .map { scoreBytes[it].toInt() and 0xff }
-            .sorted()
-        if (validScores.size < 100) {
-            listOf(left, right, mask, average, broad, contrast, gx, gy, gradient,
-                contrast32, saliency32, saliency).forEach { it.release() }
-            return null
-        }
-        val medianScore = validScores[validScores.size / 2]
-        val hotThreshold = max(28, validScores[(validScores.size * 0.84).toInt()
-            .coerceAtMost(validScores.lastIndex)])
-
-        val binary = Mat()
-        Imgproc.threshold(saliency, binary, hotThreshold.toDouble(), 255.0, Imgproc.THRESH_BINARY)
-        Core.bitwise_and(binary, mask, binary)
-        val closeKernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(9.0, 9.0))
-        Imgproc.morphologyEx(binary, binary, Imgproc.MORPH_CLOSE, closeKernel)
-        val labels = Mat()
-        val stats = Mat()
-        val centroids = Mat()
-        val componentCount = Imgproc.connectedComponentsWithStats(
-            binary,
-            labels,
-            stats,
-            centroids,
-            8,
-            CvType.CV_32S
-        )
-
-        val validArea = Core.countNonZero(mask).coerceAtLeast(1)
-        data class Component(val id: Int, val area: Int, val compactness: Double)
-        val components = (1 until componentCount).mapNotNull { id ->
-            val area = stats.get(id, Imgproc.CC_STAT_AREA)[0].toInt()
-            val width = stats.get(id, Imgproc.CC_STAT_WIDTH)[0].toInt()
-            val height = stats.get(id, Imgproc.CC_STAT_HEIGHT)[0].toInt()
-            if (area < validArea * 0.0015 || area > validArea * 0.55) return@mapNotNull null
-            Component(id, area, area.toDouble() / (width * height).coerceAtLeast(1))
-        }
-
-        val labelValues = IntArray(labels.rows() * labels.cols())
-        labels.get(0, 0, labelValues)
-        val scored = components.map { component ->
-            var weight = 0.0
-            var weightedX = 0.0
-            var weightedY = 0.0
-            var hotPixels = 0
-            for (y in 0 until saliency.rows()) {
-                val offset = y * saliency.cols()
-                for (x in 0 until saliency.cols()) {
-                    val index = offset + x
-                    if (labelValues[index] != component.id) continue
-                    val value = (scoreBytes[index].toInt() and 0xff).toDouble()
-                    if (value < hotThreshold) continue
-                    val excess = value - medianScore
-                    weight += excess
-                    weightedX += x * excess
-                    weightedY += y * excess
-                    hotPixels++
+        val shortSide = min(average.cols(), average.rows())
+        val cellSide = max(12, shortSide / 18)
+        val cells = mutableListOf<SubjectCell>()
+        var row = 0
+        for (top in 0 until average.rows() step cellSide) {
+            var column = 0
+            for (leftX in 0 until average.cols() step cellSide) {
+                val cellWidth = min(cellSide, average.cols() - leftX)
+                val cellHeight = min(cellSide, average.rows() - top)
+                val rect = Rect(leftX, top, cellWidth, cellHeight)
+                val cellMask = mask.submat(rect)
+                val validPixels = Core.countNonZero(cellMask)
+                if (validPixels >= cellWidth * cellHeight * 0.65) {
+                    val mean = MatOfDouble()
+                    val deviation = MatOfDouble()
+                    val imageCell = average.submat(rect)
+                    Core.meanStdDev(imageCell, mean, deviation, cellMask)
+                    val localContrast = deviation.toArray().firstOrNull() ?: 0.0
+                    val gradientCell = gradient.submat(rect)
+                    val residualCell = residual.submat(rect)
+                    val gradientMean = Core.mean(gradientCell, cellMask).`val`[0]
+                    val residualMean = Core.mean(residualCell, cellMask).`val`[0]
+                    val score =
+                        0.44 * localContrast +
+                            0.34 * (gradientMean / 4.0) +
+                            0.22 * residualMean
+                    cells += SubjectCell(
+                        column = column,
+                        row = row,
+                        centerX = (leftX + cellWidth / 2.0) / scale,
+                        centerY = (top + cellHeight / 2.0) / scale,
+                        validPixels = validPixels,
+                        score = score
+                    )
+                    imageCell.release()
+                    gradientCell.release()
+                    residualCell.release()
+                    mean.release()
+                    deviation.release()
                 }
+                cellMask.release()
+                column++
             }
-            Triple(component, doubleArrayOf(weight, weightedX, weightedY), hotPixels)
-        }.filter { it.second[0] > SCORE_FLOOR && it.third >= 8 }
-
-        val totalScore = scored.sumOf { it.second[0] }
-        val best = scored.maxByOrNull { it.second[0] }
-        val result = if (best == null || totalScore <= SCORE_FLOOR) {
-            null
-        } else {
-            val component = best.first
-            val weight = best.second[0]
-            val dominance = (weight / totalScore).coerceIn(0.0, 1.0)
-            val meanHot = weight / best.third + medianScore
-            val separation = ((meanHot - medianScore) / 90.0).coerceIn(0.0, 1.0)
-            val occupancy = component.area.toDouble() / validArea
-            val occupancyQuality = when {
-                occupancy < 0.004 -> occupancy / 0.004
-                occupancy <= 0.30 -> 1.0
-                else -> ((0.55 - occupancy) / 0.25).coerceIn(0.0, 1.0)
-            }
-            val confidence = (
-                0.50 * dominance +
-                    0.32 * separation +
-                    0.10 * occupancyQuality +
-                    0.08 * component.compactness.coerceIn(0.0, 1.0)
-                ).coerceIn(0.0, 1.0)
-            SubjectGuidance(
-                x = best.second[1] / weight / scale,
-                y = best.second[2] / weight / scale,
-                confidence = confidence,
-                evidenceCount = best.third
-            )
+            row++
         }
 
-        listOf(left, right, mask, average, broad, contrast, gx, gy, gradient,
-            contrast32, saliency32, saliency, binary, closeKernel, labels, stats, centroids)
+        val result = RegionalSubject.select(cells)
+        listOf(left, right, mask, average, broad, residual, gx, gy, gradient)
             .forEach { it.release() }
         return result
-    }
-
-    private companion object {
-        const val SCORE_FLOOR = 1e-6
     }
 
     /**

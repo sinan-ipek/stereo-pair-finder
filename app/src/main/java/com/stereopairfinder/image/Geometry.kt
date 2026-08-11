@@ -20,7 +20,10 @@ data class SubjectGuidance(
     val y: Double,
     /** 0 = unreliable, 1 = a compact subject clearly dominates its background. */
     val confidence: Double,
-    val evidenceCount: Int
+    val evidenceCount: Int,
+    /** Approximate half-size of the detected visual region in source pixels. */
+    val radiusX: Double = Double.NaN,
+    val radiusY: Double = Double.NaN
 )
 
 data class FramingDecision(
@@ -35,8 +38,9 @@ data class FramingDecision(
 object Geometry {
     private const val SCORE_EPSILON = 1e-9
     private const val MIN_PARALLAX_SAMPLES = 3
-    private const val MIN_SUBJECT_CONFIDENCE = 0.35
-    private const val STRONG_SUBJECT_CONFIDENCE = 0.68
+    private const val MIN_SUBJECT_CONFIDENCE = 0.55
+    private const val MIN_SUBJECT_PARALLAX_SHARE = 0.08
+    private const val MIN_SUBJECT_PARALLAX_ENRICHMENT = 1.10
     private const val MIN_CROP_RATIO = 0.92
 
     /**
@@ -103,10 +107,19 @@ object Geometry {
             weightedEvidence.sumOf { it.sample.y * it.weight } / totalWeight
         } else imageCenterY
 
-        val usableSubject = subject?.takeIf {
+        val visualCandidate = subject?.takeIf {
             it.confidence.isFinite() && it.confidence >= MIN_SUBJECT_CONFIDENCE &&
                 it.x.isFinite() && it.y.isFinite() &&
                 it.x in 0.0..<width.toDouble() && it.y in 0.0..<height.toDouble()
+        }
+        val usableSubject = visualCandidate?.takeIf {
+            !hasParallax || subjectHasParallaxSupport(
+                it,
+                weightedEvidence,
+                totalWeight,
+                width,
+                height
+            )
         }
         if (usableSubject == null && !hasParallax) {
             return FramingDecision(
@@ -119,23 +132,14 @@ object Geometry {
             )
         }
 
-        val subjectWeight = usableSubject?.let { 0.55 + 1.75 * it.confidence } ?: 0.0
-        val parallaxWeight = when {
-            !hasParallax -> 0.0
-            usableSubject == null -> 1.0
-            usableSubject.confidence >= STRONG_SUBJECT_CONFIDENCE -> 0.35
-            else -> 0.85
-        }
-        val combinedWeight = subjectWeight + parallaxWeight
-        val targetX = (
-            (usableSubject?.x ?: 0.0) * subjectWeight + parallaxX * parallaxWeight
-            ) / combinedWeight
-        val targetY = (
-            (usableSubject?.y ?: 0.0) * subjectWeight + parallaxY * parallaxWeight
-            ) / combinedWeight
+        // Strict hierarchy: a defensible subject owns the composition. If the
+        // visual candidate is stationary while the rest of the image contains
+        // depth (aircraft-wing case), it is rejected and parallax owns the crop.
+        val targetX = usableSubject?.x ?: parallaxX
+        val targetY = usableSubject?.y ?: parallaxY
         val mode = when {
-            usableSubject != null && hasParallax -> "uyarlanabilir: konu + paralaks"
             usableSubject != null -> "uyarlanabilir: belirgin konu"
+            visualCandidate != null && hasParallax -> "uyarlanabilir: paralaks (sabit konu elendi)"
             else -> "uyarlanabilir: paralaks"
         }
 
@@ -161,11 +165,7 @@ object Geometry {
         val chosen = if (possibleImprovement <= negligible * negligible) {
             candidates.first()
         } else {
-            val movementRetention = when {
-                usableSubject?.confidence ?: 0.0 >= STRONG_SUBJECT_CONFIDENCE -> 0.88
-                usableSubject != null -> 0.78
-                else -> 0.85
-            }
+            val movementRetention = if (usableSubject != null) 0.88 else 0.85
             val allowedDistance = initialDistance - possibleImprovement * movementRetention
             candidates.firstOrNull {
                 centerDistanceSquared(it, targetX, targetY) <= allowedDistance + SCORE_EPSILON
@@ -261,6 +261,44 @@ object Geometry {
         val sample: ParallaxSample,
         val weight: Double
     )
+
+    /**
+     * Rejects a visually salient but stereo-stationary overlay.
+     *
+     * This matters for photographs shot through an aircraft window: the wing can
+     * be the strongest edge structure while the desired 3D content is the cloud
+     * field. A real foreground subject such as a guitar normally owns more
+     * relative-disparity evidence than its footprint would receive by chance.
+     */
+    private fun subjectHasParallaxSupport(
+        subject: SubjectGuidance,
+        evidence: List<WeightedEvidence>,
+        totalWeight: Double,
+        width: Int,
+        height: Int
+    ): Boolean {
+        if (evidence.isEmpty() || totalWeight <= SCORE_EPSILON) return true
+
+        val fallbackRadius = min(width, height) * 0.18
+        val radiusX = subject.radiusX.takeIf { it.isFinite() && it > 0.0 }
+            ?.times(1.45) ?: fallbackRadius
+        val radiusY = subject.radiusY.takeIf { it.isFinite() && it > 0.0 }
+            ?.times(1.45) ?: fallbackRadius
+        val localWeight = evidence.asSequence()
+            .filter {
+                val dx = (it.sample.x - subject.x) / radiusX
+                val dy = (it.sample.y - subject.y) / radiusY
+                dx * dx + dy * dy <= 1.0
+            }
+            .sumOf { it.weight }
+        val localShare = localWeight / totalWeight
+        val footprintShare = (
+            Math.PI * radiusX * radiusY / (width.toDouble() * height.toDouble())
+            ).coerceIn(0.01, 1.0)
+        val enrichment = localShare / footprintShare
+        return localShare >= MIN_SUBJECT_PARALLAX_SHARE &&
+            enrichment >= MIN_SUBJECT_PARALLAX_ENRICHMENT
+    }
 
     private data class DisparityPlane(
         val xSlope: Double,
