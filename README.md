@@ -1,27 +1,51 @@
-# Stereo Pair Finder — güvenli deneme sürümü
+# Stereo Pair Finder 2.0
 
-Android 10+ (API 29) için Kotlin ve Jetpack Compose ile yazılmış, tamamen cihaz üzerinde çalışan bir SBS 3D üreticisidir. Deneme sürümü **yalnızca Android Photo Picker'da kullanıcının seçtiği** görüntüleri alır; galeri, `DCIM/Camera/` veya başka bir klasör için sorgu, otomatik tarama, izleme, geçmiş ve toplu kayıt içermez.
+Android 10+ için Kotlin ve Jetpack Compose ile yazılmış, tamamen cihaz üzerinde
+çalışan stereo fotoğraf bulucu ve 2:1 Side-by-Side (SBS) üreticisidir.
 
-## İş akışı
+## Ana ekran
 
-Metadata sırası EXIF `DateTimeOriginal` (alt saniye ve saat dilimi dâhil), `MediaStore.DATE_TAKEN`, son çare olarak salt okunur `DATE_MODIFIED` şeklindedir. Dosya adı zaman olarak kullanılmaz. Eşit zamanlar URI ile deterministik sıralanır, zamanı olmayanlar açıkça reddedilir. Zamana göre sıralı yalnızca komşu `1–2, 2–3…` çiftleri analiz edilir; varsayılan sınırlar 15 saniye ve %72'dir.
+- **Galeriyi Tara:** İlk çalıştırmada erişilebilen galeriyi tarar. Sonraki
+  çalıştırmalarda yalnız son başarılı taramadan sonra eklenen fotoğrafları alır.
+- **İki Fotoğraf Seç:** Photo Picker ile seçilen iki fotoğrafı ayrıntılı olarak
+  denetler; 1.9 sürümündeki elle inceleme ve kaydetme davranışını korur.
 
-OpenCV 4.10, yönü EXIF'e göre düzeltilmiş ve en çok 2048 piksellik bellek kopyalarında ORB özellikleri çıkarır. Hamming KNN ve Lowe 0,75 oran testi sonrasında temel matris RANSAC ile hesaplanır. Benzerlik, RANSAC iç eşleşmelerinin küçük özellik kümesine oranının kanıt ölçekli, 0–100'e kırpılmış değeridir; 18'den az iç eşleşme puan üretmez. `stereoRectifyUncalibrated` iki görüntüyü ortak koordinat sistemine taşır. Sonlu/ölçek sınırındaki homografiler kabul edilir; dönüşmüş iç eşleşmelerin **medyan mutlak düşey farkı** kalan düşey paralakstır. Güven, bu medyan ile iç eşleşme desteğini birleştirir. 2,5 px üzeri hata, %35 altı ortak alan veya %97 geçerli olmayan ortak kare reddedilir.
+## Otomatik tarama
 
-Her homografi ayrıca geçerli piksel maskesine uygulanır. Maskelerin kesişimindeki güvenli dikdörtgenin merkezindeki en büyük kare, her iki göze aynı koordinatlarla uygulanır. Kareler eşit boyutludur; önceki görüntü soldadır. SBS tam 2:1'dir, göz başına en çok 2048 px (toplam 4096×2048), düşük çözünürlük büyütülmez. JPEG kalite değeri **95**'tir.
+- Fotoğraflar çekim zamanına göre sıralanır.
+- Yalnız örtüşmeli komşu çiftler incelenir: `1–2`, `2–3`, `3–4`...
+- Ardışık olmayan `1–3` gibi çiftler hiçbir zaman denenmez.
+- Uygun çiftler otomatik olarak `Pictures/StereoPairFinder/` klasörüne kaydedilir.
+- Uygulamanın kendi çıktı klasörü sonraki taramalara dahil edilmez.
+- Android 11 ve üzerinde her depolama alanı için
+  `MediaStore version + GENERATION_ADDED` ilerleme noktası kullanılır.
+- Android 10'da yedek olarak `DATE_ADDED + MediaStore ID` kullanılır.
+- Son sınır fotoğrafı silinse bile ilerleme kaydı korunur.
+- Yalnız bir yeni fotoğraf varsa ilerleme noktası ilerletilmez; sonraki fotoğraf
+  geldiğinde yeni grubun ilk ardışık çifti kaybolmaz.
+- Otomatik çıktı adları kaynak çiftinden kararlı biçimde türetilir. Kesinti
+  sonrasında aynı grup yeniden işlenirse aynı SBS ikinci kez oluşturulmaz.
 
-## Depolama güvenliği ve izinler
+## Görüntü güvenliği
 
-Manifest **hiçbir Android izni istemez**. Özellikle `MANAGE_EXTERNAL_STORAGE`, `WRITE_EXTERNAL_STORAGE`, `READ_MEDIA_IMAGES` ve `READ_EXTERNAL_STORAGE` yoktur. Photo Picker seçili URI'ye geçici okuma yetkisi verir. Kaynaklar sadece `openInputStream`, `openFileDescriptor(..., "r")` ve salt okunur metadata sorgusuyla açılır; kaynak URI üzerinde output stream, update veya delete yolu yoktur. İşleme yalnızca bitmap kopyalarında yapılır.
+1.9 motoru aynen korunmuştur. Perspektif hizalama yalnız analiz kopyalarında
+paralaks ölçümü için kullanılır. Kaydedilen SBS yolunda yalnız:
 
-Kullanıcı başarılı karttaki kaydet düğmesine basınca `MediaStore.insert()` benzersiz tarih-milisaniye-UUID adıyla `Pictures/Stereo SBS Test/` altında yeni bir kayıt oluşturur. Sadece dönen yeni URI yazılır; `update()` sadece aynı URI'nin `IS_PENDING` bayrağını tamamlar. Hata temizliği yalnızca o çağrıda yeni oluşturulan yarım URI'yi siler. Var olan dosyaya yazılmaz ve her basış yeni dosyadır. Kayıtlı dosya silme arayüzü yoktur.
+`kaynak Mat → tam genişlikli dikey kare submat → copy → hconcat`
 
-## Derleme
+bulunur. Çıktıya homografi, shear, döndürme, perspektif dönüşümü, farklı X/Y
+ölçekleme veya stretch uygulanmaz. Düşey hizalama, iki kaynakta farklı başlangıç
+satırları seçen saf translation ile yapılır. Üst/orta/alt kadrajlar `%70/%30`,
+`%50/%50` veya `%30/%70` dengeli kırpma kullanır.
+
+Kaynak fotoğraflar yalnızca okunur; silinmez, değiştirilmez veya taşınmaz.
+
+## Doğrulama
 
 ```bash
-./gradlew test
-./gradlew lintDebug
-./gradlew assembleDebug
+gradle testDebugUnitTest
+gradle lintDebug
+gradle assembleDebug
 ```
 
-Debug APK: `app/build/outputs/apk/debug/app-debug.apk`.
+Debug APK: `app/build/outputs/apk/debug/app-debug.apk`

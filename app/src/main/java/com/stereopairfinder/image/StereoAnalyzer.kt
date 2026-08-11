@@ -1,6 +1,7 @@
 package com.stereopairfinder.image
 
 import android.graphics.Bitmap
+import com.stereopairfinder.BuildConfig
 import com.stereopairfinder.model.*
 import org.opencv.android.Utils
 import org.opencv.calib3d.Calib3d
@@ -8,8 +9,12 @@ import org.opencv.core.*
 import org.opencv.features2d.BFMatcher
 import org.opencv.features2d.ORB
 import org.opencv.imgproc.Imgproc
+import org.opencv.video.Video
 import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 class StereoAnalyzer {
     init {
@@ -30,13 +35,15 @@ class StereoAnalyzer {
 
         val targetW = min(left.cols(), right.cols())
         val targetH = min(left.rows(), right.rows())
-        Imgproc.resize(left, left, Size(targetW.toDouble(), targetH.toDouble()))
-        Imgproc.resize(right, right, Size(targetW.toDouble(), targetH.toDouble()))
+        val analysisL = Mat()
+        val analysisR = Mat()
+        Imgproc.resize(left, analysisL, Size(targetW.toDouble(), targetH.toDouble()))
+        Imgproc.resize(right, analysisR, Size(targetW.toDouble(), targetH.toDouble()))
 
         val grayL = Mat()
         val grayR = Mat()
-        Imgproc.cvtColor(left, grayL, Imgproc.COLOR_RGBA2GRAY)
-        Imgproc.cvtColor(right, grayR, Imgproc.COLOR_RGBA2GRAY)
+        Imgproc.cvtColor(analysisL, grayL, Imgproc.COLOR_RGBA2GRAY)
+        Imgproc.cvtColor(analysisR, grayR, Imgproc.COLOR_RGBA2GRAY)
 
         val orb = ORB.create(2500)
         val kpL = MatOfKeyPoint()
@@ -55,6 +62,7 @@ class StereoAnalyzer {
                 if (matches.size >= 2 && matches[0].distance < .75f * matches[1].distance) {
                     good += matches[0]
                 }
+                row.release()
             }
         }
 
@@ -92,12 +100,34 @@ class StereoAnalyzer {
         var sbs: Bitmap? = null
         var alignedL: Bitmap? = null
         var alignedR: Bitmap? = null
+        var verticalTranslation = 0.0
+        var cropCenterXPercent: Double? = null
+        var cropCenterYPercent: Double? = null
+        var cropSidePercent: Double? = null
+        var parallaxEvidenceCount = 0
+        var framingMode = "merkezden kırp"
+        var parallaxBands: BandValues? = null
+        var uniformityBands: BandValues? = null
 
         if (evidence && !fundamental.empty()) {
             val inL = MatOfPoint2f()
             val inR = MatOfPoint2f()
-            inL.fromList(inlierMatches.map { pL[it.queryIdx].pt })
-            inR.fromList(inlierMatches.map { pR[it.trainIdx].pt })
+            val inlierLeftPoints = inlierMatches.map { pL[it.queryIdx].pt }
+            val inlierRightPoints = inlierMatches.map { pR[it.trainIdx].pt }
+            inL.fromList(inlierLeftPoints)
+            inR.fromList(inlierRightPoints)
+
+            val verticalOffsets = inlierLeftPoints.zip(inlierRightPoints)
+                .map { (leftPoint, rightPoint) -> rightPoint.y - leftPoint.y }
+            verticalTranslation = Geometry.median(verticalOffsets)
+            median = Geometry.median(
+                verticalOffsets.map { abs(it - verticalTranslation) }
+            )
+            area = if (verticalTranslation.isFinite()) {
+                (1.0 - abs(verticalTranslation) / targetH).coerceIn(0.0, 1.0)
+            } else {
+                0.0
+            }
 
             val h1 = Mat()
             val h2 = Mat()
@@ -112,11 +142,6 @@ class StereoAnalyzer {
             )
 
             if (ok && sane(h1) && sane(h2)) {
-                val warpL = Mat()
-                val warpR = Mat()
-                Imgproc.warpPerspective(left, warpL, h1, Size(targetW.toDouble(), targetH.toDouble()))
-                Imgproc.warpPerspective(right, warpR, h2, Size(targetW.toDouble(), targetH.toDouble()))
-
                 val one = Mat.ones(targetH, targetW, CvType.CV_8U)
                 val m1 = Mat()
                 val m2 = Mat()
@@ -137,7 +162,6 @@ class StereoAnalyzer {
 
                 val common = Mat()
                 Core.bitwise_and(m1, m2, common)
-                area = Core.countNonZero(common).toDouble() / (targetW * targetH)
 
                 val validPixels = ByteArray(targetW * targetH)
                 common.get(0, 0, validPixels)
@@ -146,40 +170,102 @@ class StereoAnalyzer {
                 val transformedR = MatOfPoint2f()
                 Core.perspectiveTransform(inL, transformedL, h1)
                 Core.perspectiveTransform(inR, transformedR, h2)
-                val rectifiedLeftPoints = transformedL.toArray()
-                val rectifiedRightPoints = transformedR.toArray()
-                val rectifiedPairs = rectifiedLeftPoints.zip(rectifiedRightPoints)
+                val rectifiedPairs = transformedL.toArray().zip(transformedR.toArray())
 
-                median = Geometry.median(
-                    rectifiedPairs.map { abs(it.first.y - it.second.y) }
-                )
-                val parallaxSamples = rectifiedPairs.map { (leftPoint, rightPoint) ->
+                val featureSamples = rectifiedPairs.map { (leftPoint, rightPoint) ->
                     ParallaxSample(
                         x = (leftPoint.x + rightPoint.x) / 2.0,
                         y = (leftPoint.y + rightPoint.y) / 2.0,
-                        disparity = abs(leftPoint.x - rightPoint.x)
+                        disparity = leftPoint.x - rightPoint.x
                     )
                 }
-                val square = Geometry.largestValidSquare(
+
+                val rectifiedGrayL = Mat()
+                val rectifiedGrayR = Mat()
+                Imgproc.warpPerspective(
+                    grayL,
+                    rectifiedGrayL,
+                    h1,
+                    Size(targetW.toDouble(), targetH.toDouble())
+                )
+                Imgproc.warpPerspective(
+                    grayR,
+                    rectifiedGrayR,
+                    h2,
+                    Size(targetW.toDouble(), targetH.toDouble())
+                )
+                val denseSamples = runCatching {
+                    denseParallaxSamples(rectifiedGrayL, rectifiedGrayR, common)
+                }.getOrDefault(emptyList())
+                val uniformity = runCatching {
+                    verticalUniformity(rectifiedGrayL, rectifiedGrayR, common)
+                }.getOrNull()
+                rectifiedGrayL.release()
+                rectifiedGrayR.release()
+
+                val parallaxSamples = if (denseSamples.size >= 12) denseSamples else featureSamples
+                parallaxEvidenceCount = parallaxSamples.size
+                val framing = Geometry.verticalCrop(
                     validPixels,
                     targetW,
                     targetH,
-                    parallaxSamples
+                    parallaxSamples,
+                    uniformity
                 )
+                if (framing != null) {
+                    framingMode = framing.mode
+                    parallaxBands = framing.parallax
+                    uniformityBands = framing.uniformity
+                    val sourceCrops = Geometry.translatedSourceCrops(
+                        left.cols(),
+                        left.rows(),
+                        right.cols(),
+                        right.rows(),
+                        targetH,
+                        verticalTranslation,
+                        framing.placement
+                    )
+                    val sourceCropL = sourceCrops?.left
+                    val sourceCropR = sourceCrops?.right
 
-                if (square != null) {
-                    confidence = (100.0 - median * 15.0).coerceIn(0.0, 100.0) *
-                        (inlierMatches.size / (inlierMatches.size + 15.0))
+                    cropCenterXPercent = 50.0
+                    cropCenterYPercent = sourceCropL?.let {
+                        100.0 * (it.top + it.bottom) / 2.0 / left.rows()
+                    }
+                    cropSidePercent = sourceCropL?.let {
+                        100.0 * it.width / left.cols()
+                    }
 
-                    aligned = median <= 2.5 && area >= .35
+                    confidence = Geometry.verticalAlignmentConfidence(
+                        medianResidual = median,
+                        imageHeight = targetH,
+                        reliableMatches = inlierMatches.size
+                    )
+
+                    aligned = Geometry.verticalAlignmentIsAcceptable(median, targetH) &&
+                        area >= .35 &&
+                        sourceCrops != null &&
+                        Geometry.outputCropsAreCompatible(sourceCrops)
                     if (aligned) {
-                        val cropL = warpL.submat(square.top, square.bottom, square.left, square.right)
-                        val cropR = warpR.submat(square.top, square.bottom, square.left, square.right)
-                        val side = Geometry.outputSide(square.width)
+                        // Different source top rows apply pure vertical
+                        // translation. Output pixels never pass through a
+                        // homography, rotation, shear or perspective warp.
+                        val cropL = left.submat(
+                            sourceCropL!!.top,
+                            sourceCropL.bottom,
+                            sourceCropL.left,
+                            sourceCropL.right
+                        )
+                        val cropR = right.submat(
+                            sourceCropR!!.top,
+                            sourceCropR.bottom,
+                            sourceCropR.left,
+                            sourceCropR.right
+                        )
                         val outL = Mat()
                         val outR = Mat()
-                        Imgproc.resize(cropL, outL, Size(side.toDouble(), side.toDouble()))
-                        Imgproc.resize(cropR, outR, Size(side.toDouble(), side.toDouble()))
+                        cropL.copyTo(outL)
+                        cropR.copyTo(outR)
 
                         alignedL = outL.bitmap()
                         alignedR = outR.bitmap()
@@ -197,8 +283,6 @@ class StereoAnalyzer {
 
                 transformedL.release()
                 transformedR.release()
-                warpL.release()
-                warpR.release()
                 one.release()
                 m1.release()
                 m2.release()
@@ -222,21 +306,180 @@ class StereoAnalyzer {
             threshold
         )
 
-        listOf(left, right, grayL, grayR, kpL, kpR, dL, dR, src, dst, mask, fundamental)
+        listOf(
+            left,
+            right,
+            analysisL,
+            analysisR,
+            grayL,
+            grayR,
+            kpL,
+            kpR,
+            dL,
+            dR,
+            src,
+            dst,
+            mask,
+            fundamental
+        )
             .forEach { it.release() }
 
         return AnalysisResult(
-            pair,
-            similarity,
-            inlierMatches.size,
-            confidence,
-            median,
-            area,
-            status,
-            alignedL ?: leftBitmap,
-            alignedR ?: rightBitmap,
-            sbs
+            pair = pair,
+            similarity = similarity,
+            reliableMatches = inlierMatches.size,
+            alignmentConfidence = confidence,
+            medianVerticalError = median,
+            verticalTranslationPx = verticalTranslation,
+            commonAreaRatio = area,
+            status = status,
+            leftPreview = alignedL ?: leftBitmap,
+            rightPreview = alignedR ?: rightBitmap,
+            sbsPreview = sbs,
+            algorithmVersion = BuildConfig.VERSION_NAME,
+            cropCenterXPercent = cropCenterXPercent,
+            cropCenterYPercent = cropCenterYPercent,
+            cropSidePercent = cropSidePercent,
+            parallaxEvidenceCount = parallaxEvidenceCount,
+            framingMode = framingMode,
+            parallaxBands = parallaxBands,
+            uniformityBands = uniformityBands
         )
+    }
+
+    /**
+     * Measures how varied each broad horizontal band is. Standard deviation is
+     * intentionally used instead of object recognition: a blue sky or plain wall
+     * receives a small value and is therefore a good fallback place to crop.
+     */
+    private fun verticalUniformity(
+        grayL: Mat,
+        grayR: Mat,
+        commonMask: Mat
+    ): BandValues {
+        val average = Mat()
+        Core.addWeighted(grayL, 0.5, grayR, 0.5, 0.0, average)
+
+        fun deviation(top: Int, bottom: Int): Double {
+            if (bottom <= top) return 0.0
+            val rect = Rect(0, top, average.cols(), bottom - top)
+            val imageBand = average.submat(rect)
+            val maskBand = commonMask.submat(rect)
+            val mean = MatOfDouble()
+            val stddev = MatOfDouble()
+            Core.meanStdDev(imageBand, mean, stddev, maskBand)
+            val value = stddev.toArray().firstOrNull() ?: 0.0
+            imageBand.release()
+            maskBand.release()
+            mean.release()
+            stddev.release()
+            return value
+        }
+
+        val first = average.rows() / 3
+        val second = average.rows() * 2 / 3
+        val result = BandValues(
+            top = deviation(0, first),
+            middle = deviation(first, second),
+            bottom = deviation(second, average.rows())
+        )
+        average.release()
+        return result
+    }
+
+    /**
+     * Builds a dense, forward/backward-consistent rectified disparity sample set.
+     * Texture filtering avoids letting blank sky dominate; the reverse-flow check
+     * rejects ambiguous or occluded correspondences.
+     */
+    private fun denseParallaxSamples(
+        grayL: Mat,
+        grayR: Mat,
+        commonMask: Mat
+    ): List<ParallaxSample> {
+        val maxDimension = max(grayL.cols(), grayL.rows())
+        if (maxDimension <= 0) return emptyList()
+        val scale = min(1.0, 640.0 / maxDimension)
+        val smallSize = Size(
+            max(1, (grayL.cols() * scale).roundToInt()).toDouble(),
+            max(1, (grayL.rows() * scale).roundToInt()).toDouble()
+        )
+
+        val smallL = Mat()
+        val smallR = Mat()
+        val smallMask = Mat()
+        Imgproc.resize(grayL, smallL, smallSize, 0.0, 0.0, Imgproc.INTER_AREA)
+        Imgproc.resize(grayR, smallR, smallSize, 0.0, 0.0, Imgproc.INTER_AREA)
+        Imgproc.resize(commonMask, smallMask, smallSize, 0.0, 0.0, Imgproc.INTER_NEAREST)
+
+        val forward = Mat()
+        val reverse = Mat()
+        Video.calcOpticalFlowFarneback(smallL, smallR, forward, 0.5, 5, 21, 5, 7, 1.5, 0)
+        Video.calcOpticalFlowFarneback(smallR, smallL, reverse, 0.5, 5, 21, 5, 7, 1.5, 0)
+
+        val gradientX = Mat()
+        val gradientY = Mat()
+        Imgproc.Sobel(
+            smallL,
+            gradientX,
+            CvType.CV_32F,
+            1,
+            0,
+            3,
+            1.0,
+            0.0,
+            Core.BORDER_DEFAULT
+        )
+        Imgproc.Sobel(
+            smallL,
+            gradientY,
+            CvType.CV_32F,
+            0,
+            1,
+            3,
+            1.0,
+            0.0,
+            Core.BORDER_DEFAULT
+        )
+
+        val samples = ArrayList<ParallaxSample>()
+        val step = 4
+        for (y in (step until (smallL.rows() - step)) step step) {
+            for (x in (step until (smallL.cols() - step)) step step) {
+                if (smallMask.get(y, x)[0] == 0.0) continue
+                val texture = abs(gradientX.get(y, x)[0]) + abs(gradientY.get(y, x)[0])
+                if (texture < 12.0) continue
+
+                val flow = forward.get(y, x)
+                if (flow.size < 2 || !flow[0].isFinite() || !flow[1].isFinite()) continue
+                if (abs(flow[1]) > 2.5) continue
+
+                val targetX = (x + flow[0]).roundToInt()
+                val targetY = (y + flow[1]).roundToInt()
+                if (
+                    targetX !in (1 until (smallL.cols() - 1)) ||
+                    targetY !in (1 until (smallL.rows() - 1))
+                ) {
+                    continue
+                }
+                if (smallMask.get(targetY, targetX)[0] == 0.0) continue
+
+                val backward = reverse.get(targetY, targetX)
+                if (backward.size < 2) continue
+                val consistency = hypot(flow[0] + backward[0], flow[1] + backward[1])
+                if (!consistency.isFinite() || consistency > 1.5) continue
+
+                samples += ParallaxSample(
+                    x = x / scale,
+                    y = y / scale,
+                    disparity = -flow[0] / scale
+                )
+            }
+        }
+
+        listOf(smallL, smallR, smallMask, forward, reverse, gradientX, gradientY)
+            .forEach { it.release() }
+        return samples
     }
 
     private fun sane(h: Mat): Boolean {

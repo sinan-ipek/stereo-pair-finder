@@ -2,17 +2,29 @@ package com.stereopairfinder
 
 import android.content.ContentResolver
 import com.stereopairfinder.data.SbsSaver
+import com.stereopairfinder.image.BandValues
 import com.stereopairfinder.image.CropSquare
 import com.stereopairfinder.image.Geometry
 import com.stereopairfinder.image.ParallaxSample
+import com.stereopairfinder.image.StereoSourceCrops
+import com.stereopairfinder.image.VerticalCropPlacement
 import com.stereopairfinder.model.CameraFolderPolicy
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.Mockito.mock
 import java.time.Instant
 import java.util.UUID
 
 class PolicyAndOutputTest {
+    private val width = 100
+    private val height = 160
+    private val fullMask = ByteArray(width * height) { 1 }
+
     @Test
     fun `camera policy only accepts exact primary path`() {
         assertTrue(CameraFolderPolicy.accepts("external_primary", "DCIM/Camera/"))
@@ -37,53 +49,253 @@ class PolicyAndOutputTest {
         )
         assertEquals(2048, Geometry.outputSide(5000))
         assertEquals(640, Geometry.outputSide(640))
+    }
+
+    @Test
+    fun `lower parallax favors the bottom with a seventy thirty crop`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 1.0, middle = 1.2, bottom = 5.0),
+            BandValues(top = 20.0, middle = 20.0, bottom = 20.0)
+        )
+
+        assertNotNull(decision)
+        assertEquals(CropSquare(0, 42, 100, 142), decision!!.square)
+        assertTrue(decision.mode.startsWith("ağırlıklı üstten kırp"))
+    }
+
+    @Test
+    fun `upper parallax favors the top with a thirty seventy crop`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 6.0, middle = 1.0, bottom = 1.1),
+            BandValues(top = 20.0, middle = 20.0, bottom = 20.0)
+        )
+
+        assertEquals(CropSquare(0, 18, 100, 118), decision!!.square)
+        assertTrue(decision.mode.startsWith("ağırlıklı alttan kırp"))
+    }
+
+    @Test
+    fun `middle parallax crops top and bottom equally`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 1.0, middle = 5.0, bottom = 1.0),
+            BandValues(top = 20.0, middle = 20.0, bottom = 20.0)
+        )
+
+        assertEquals(CropSquare(0, 30, 100, 130), decision!!.square)
+        assertTrue(decision.mode.startsWith("merkezden kırp"))
+    }
+
+    @Test
+    fun `similar parallax values use a centered crop`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 3.0, middle = 3.2, bottom = 3.1),
+            BandValues(top = 15.0, middle = 16.0, bottom = 16.0)
+        )
+
+        assertEquals(CropSquare(0, 30, 100, 130), decision!!.square)
+        assertEquals("merkezden kırp · fark belirgin değil", decision.mode)
+    }
+
+    @Test
+    fun `flat sky at the top is cropped when parallax is indecisive`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 2.0, middle = 2.1, bottom = 2.0),
+            BandValues(top = 5.0, middle = 18.0, bottom = 28.0)
+        )
+
+        assertEquals(CropSquare(0, 42, 100, 142), decision!!.square)
+        assertEquals("ağırlıklı üstten kırp · üst bölge daha tekdüze", decision.mode)
+    }
+
+    @Test
+    fun `flat area at the bottom is cropped when parallax is indecisive`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 2.0, middle = 2.1, bottom = 2.0),
+            BandValues(top = 30.0, middle = 18.0, bottom = 4.0)
+        )
+
+        assertEquals(CropSquare(0, 18, 100, 118), decision!!.square)
+        assertEquals("ağırlıklı alttan kırp · alt bölge daha tekdüze", decision.mode)
+    }
+
+    @Test
+    fun `clear parallax wins over an opposing flat-area suggestion`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            samples(top = 1.0, middle = 1.0, bottom = 7.0),
+            BandValues(top = 35.0, middle = 20.0, bottom = 3.0)
+        )
+
+        assertEquals(CropSquare(0, 42, 100, 142), decision!!.square)
+        assertEquals("ağırlıklı üstten kırp · alt paralaks güçlü", decision.mode)
+    }
+
+    @Test
+    fun `portrait crop preserves the complete image width when it is valid`() {
+        val decision = Geometry.verticalCrop(
+            fullMask,
+            width,
+            height,
+            emptyList(),
+            BandValues(top = 20.0, middle = 20.0, bottom = 20.0)
+        )
+
+        assertEquals(0, decision!!.square.left)
+        assertEquals(width, decision.square.right)
+        assertEquals(width, decision.square.width)
+    }
+
+    @Test
+    fun `original output crops only rows and preserves every source column`() {
         assertEquals(
-            2.0,
-            (Geometry.outputSide(5000) * 2).toDouble() / Geometry.outputSide(5000),
-            0.0
+            CropSquare(0, 42, 100, 142),
+            Geometry.originalCrop(width, height, VerticalCropPlacement.CUT_TOP)
+        )
+        assertEquals(
+            CropSquare(0, 30, 100, 130),
+            Geometry.originalCrop(width, height, VerticalCropPlacement.CENTER)
+        )
+        assertEquals(
+            CropSquare(0, 18, 100, 118),
+            Geometry.originalCrop(width, height, VerticalCropPlacement.CUT_BOTTOM)
+        )
+        assertNull(Geometry.originalCrop(160, 100, VerticalCropPlacement.CENTER))
+    }
+
+    @Test
+    fun `positive vertical translation uses a lower start row in the right image`() {
+        val crops = Geometry.translatedSourceCrops(
+            leftWidth = 100,
+            leftHeight = 160,
+            rightWidth = 100,
+            rightHeight = 160,
+            analysisHeight = 160,
+            verticalOffsetInAnalysis = 6.0,
+            placement = VerticalCropPlacement.CENTER
+        )
+
+        assertNotNull(crops)
+        assertEquals(CropSquare(0, 27, 100, 127), crops!!.left)
+        assertEquals(CropSquare(0, 33, 100, 133), crops.right)
+        assertEquals(6, crops.right.top - crops.left.top)
+    }
+
+    @Test
+    fun `negative vertical translation uses a lower start row in the left image`() {
+        val crops = Geometry.translatedSourceCrops(
+            leftWidth = 100,
+            leftHeight = 160,
+            rightWidth = 100,
+            rightHeight = 160,
+            analysisHeight = 160,
+            verticalOffsetInAnalysis = -7.0,
+            placement = VerticalCropPlacement.CENTER
+        )
+
+        assertNotNull(crops)
+        assertTrue(kotlin.math.abs((crops!!.left.top - crops.right.top) - 7) <= 1)
+        assertEquals(0, crops.left.left)
+        assertEquals(100, crops.left.right)
+        assertEquals(0, crops.right.left)
+        assertEquals(100, crops.right.right)
+    }
+
+    @Test
+    fun `translation is scaled independently for equal-aspect source sizes`() {
+        val crops = Geometry.translatedSourceCrops(
+            leftWidth = 100,
+            leftHeight = 160,
+            rightWidth = 200,
+            rightHeight = 320,
+            analysisHeight = 160,
+            verticalOffsetInAnalysis = 6.0,
+            placement = VerticalCropPlacement.CENTER
+        )
+
+        assertNotNull(crops)
+        assertEquals(CropSquare(0, 27, 100, 127), crops!!.left)
+        assertEquals(CropSquare(0, 66, 200, 266), crops.right)
+        assertEquals(crops.left.width, crops.left.height)
+        assertEquals(crops.right.width, crops.right.height)
+    }
+
+    @Test
+    fun `translation respects top center and bottom crop choices`() {
+        val topKept = Geometry.translatedSourceCrops(
+            100, 160, 100, 160, 160, 6.0, VerticalCropPlacement.CUT_BOTTOM
+        )!!
+        val bottomKept = Geometry.translatedSourceCrops(
+            100, 160, 100, 160, 160, 6.0, VerticalCropPlacement.CUT_TOP
+        )!!
+
+        assertEquals(16, topKept.left.top)
+        assertEquals(22, topKept.right.top)
+        assertEquals(38, bottomKept.left.top)
+        assertEquals(44, bottomKept.right.top)
+    }
+
+    @Test
+    fun `translation never accepts an impossible offset or mismatched aspect ratio`() {
+        assertNull(
+            Geometry.translatedSourceCrops(
+                100, 160, 100, 160, 160, 80.0, VerticalCropPlacement.CENTER
+            )
+        )
+        assertNull(
+            Geometry.translatedSourceCrops(
+                100, 160, 100, 170, 160, 2.0, VerticalCropPlacement.CENTER
+            )
         )
     }
 
     @Test
-    fun `largest valid square avoids invalid perspective corners`() {
-        val rows = listOf(
-            "11100",
-            "11100",
-            "11111",
-            "00111"
+    fun `output accepts only equal square crops and never relies on resizing`() {
+        assertTrue(
+            Geometry.outputCropsAreCompatible(
+                StereoSourceCrops(
+                    CropSquare(0, 20, 100, 120),
+                    CropSquare(0, 26, 100, 126)
+                )
+            )
         )
-        val mask = rows.joinToString("").map { if (it == '1') 1.toByte() else 0.toByte() }
-            .toByteArray()
-
-        assertEquals(
-            CropSquare(left = 0, top = 0, right = 3, bottom = 3),
-            Geometry.largestValidSquare(mask, width = 5, height = 4)
-        )
-        assertNull(Geometry.largestValidSquare(ByteArray(12), width = 4, height = 3))
-    }
-
-    @Test
-    fun `largest valid square prefers the region with stronger parallax`() {
-        val mask = ByteArray(4 * 6) { 1 }
-        val samples = listOf(
-            ParallaxSample(x = 1.0, y = 1.0, disparity = 1.0),
-            ParallaxSample(x = 1.5, y = 5.2, disparity = 12.0),
-            ParallaxSample(x = 2.5, y = 4.8, disparity = 8.0)
-        )
-
-        assertEquals(
-            CropSquare(left = 0, top = 2, right = 4, bottom = 6),
-            Geometry.largestValidSquare(mask, width = 4, height = 6, parallaxSamples = samples)
+        assertFalse(
+            Geometry.outputCropsAreCompatible(
+                StereoSourceCrops(
+                    CropSquare(0, 20, 100, 120),
+                    CropSquare(0, 52, 200, 252)
+                )
+            )
         )
     }
 
     @Test
-    fun `largest valid square falls back to the image center without parallax`() {
-        val mask = ByteArray(4 * 6) { 1 }
-
-        assertEquals(
-            CropSquare(left = 0, top = 1, right = 4, bottom = 5),
-            Geometry.largestValidSquare(mask, width = 4, height = 6)
+    fun `an empty common mask has no crop`() {
+        assertNull(
+            Geometry.verticalCrop(
+                ByteArray(width * height),
+                width,
+                height
+            )
         )
     }
 
@@ -95,6 +307,48 @@ class PolicyAndOutputTest {
             Geometry.saneHomography(
                 doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, Double.NaN)
             )
+        )
+    }
+
+    @Test
+    fun `vertical residual tolerance scales with analysis height`() {
+        assertEquals(2.5, Geometry.verticalResidualTolerance(160), 0.0)
+        assertEquals(12.0, Geometry.verticalResidualTolerance(4000), 0.0)
+        assertEquals(6.144, Geometry.verticalResidualTolerance(2048), 0.000_001)
+
+        assertFalse(Geometry.verticalAlignmentIsAcceptable(4.92, 160))
+        assertTrue(Geometry.verticalAlignmentIsAcceptable(4.92, 2048))
+    }
+
+    @Test
+    fun `guitar case keeps a healthy confidence without weakening small images`() {
+        val confidence = Geometry.verticalAlignmentConfidence(
+            medianResidual = 4.92,
+            imageHeight = 2048,
+            reliableMatches = 426
+        )
+
+        assertTrue(confidence >= 60.0)
+        assertTrue(confidence <= 100.0)
+        assertTrue(
+            Geometry.verticalAlignmentConfidence(
+                medianResidual = 4.92,
+                imageHeight = 160,
+                reliableMatches = 426
+            ) < 60.0
+        )
+    }
+
+    private fun samples(top: Double, middle: Double, bottom: Double): List<ParallaxSample> =
+        bandSamples(y = 15.0, disparity = top) +
+            bandSamples(y = 75.0, disparity = middle) +
+            bandSamples(y = 140.0, disparity = bottom)
+
+    private fun bandSamples(y: Double, disparity: Double) = (0 until 8).map { index ->
+        ParallaxSample(
+            x = 10.0 + index * 10.0,
+            y = y + (index % 2),
+            disparity = disparity + (index % 3 - 1) * 0.04
         )
     }
 }
