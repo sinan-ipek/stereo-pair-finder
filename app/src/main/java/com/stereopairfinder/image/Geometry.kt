@@ -17,20 +17,17 @@ data class ParallaxSample(
 
 object Geometry {
     private const val SCORE_EPSILON = 1e-9
-    private const val NEAR_BEST_SCORE_RATIO = 0.98
+    private const val MOVABLE_CROP_RATIO = 0.92
     private const val MIN_PARALLAX_SAMPLES = 3
 
     /**
-     * Finds the largest axis-aligned square whose every pixel is valid.
+     * Finds a fully valid square crop.
      *
-     * Perspective warps can leave triangular invalid corners, so the square size
-     * is determined only from fully valid pixels. Crop placement uses relative
-     * parallax: a robust affine disparity plane is fitted to the dominant scene
-     * surface and only deviations from that plane count as depth evidence. This
-     * prevents a global rectification offset or a textured background from being
-     * mistaken for the foreground. Among candidates that retain nearly all of
-     * the strongest evidence, the crop whose center is closest to the evidence
-     * centroid is selected. With no reliable evidence, image center is used.
+     * Without reliable relative-parallax evidence this returns the largest square
+     * closest to the image center. When evidence exists, the crop side is reduced
+     * to 92% of the largest valid side. That small size concession gives the crop
+     * room to move, and the valid square whose center is closest to the relative-
+     * parallax centroid is selected.
      */
     fun largestValidSquare(
         mask: ByteArray,
@@ -42,6 +39,51 @@ object Geometry {
         require(mask.size == width * height)
         if (width == 0 || height == 0) return null
 
+        val imageCenterX = width / 2.0
+        val imageCenterY = height / 2.0
+        val largest = largestSquares(mask, width, height)
+        if (largest.side == 0) return null
+
+        val usableSamples = parallaxSamples.filter {
+            it.x.isFinite() && it.y.isFinite() && it.disparity.isFinite() &&
+                it.x >= 0.0 && it.x < width && it.y >= 0.0 && it.y < height
+        }
+        val weightedEvidence = relativeParallaxEvidence(usableSamples, width, height)
+        if (weightedEvidence.size < MIN_PARALLAX_SAMPLES) {
+            return largest.squares.minByOrNull {
+                centerDistanceSquared(it, imageCenterX, imageCenterY)
+            }
+        }
+
+        val totalWeight = weightedEvidence.sumOf { it.weight }
+        if (totalWeight <= SCORE_EPSILON) {
+            return largest.squares.minByOrNull {
+                centerDistanceSquared(it, imageCenterX, imageCenterY)
+            }
+        }
+
+        val evidenceCenterX = weightedEvidence.sumOf { it.sample.x * it.weight } / totalWeight
+        val evidenceCenterY = weightedEvidence.sumOf { it.sample.y * it.weight } / totalWeight
+        val movableSide = maxOf(1, (largest.side * MOVABLE_CROP_RATIO).toInt())
+
+        return closestValidSquare(
+            mask = mask,
+            width = width,
+            height = height,
+            side = movableSide,
+            targetX = evidenceCenterX,
+            targetY = evidenceCenterY
+        ) ?: largest.squares.minByOrNull {
+            centerDistanceSquared(it, evidenceCenterX, evidenceCenterY)
+        }
+    }
+
+    private data class LargestSquares(
+        val side: Int,
+        val squares: List<CropSquare>
+    )
+
+    private fun largestSquares(mask: ByteArray, width: Int, height: Int): LargestSquares {
         var previous = IntArray(width + 1)
         var bestSide = 0
         val candidates = mutableListOf<CropSquare>()
@@ -68,70 +110,47 @@ object Geometry {
             }
             previous = current
         }
+        return LargestSquares(bestSide, candidates)
+    }
 
-        if (bestSide == 0) return null
+    /** Finds the valid square of an exact side whose center is nearest a target. */
+    private fun closestValidSquare(
+        mask: ByteArray,
+        width: Int,
+        height: Int,
+        side: Int,
+        targetX: Double,
+        targetY: Double
+    ): CropSquare? {
+        var previous = IntArray(width + 1)
+        var selected: CropSquare? = null
+        var selectedDistance = Double.POSITIVE_INFINITY
 
-        val usableSamples = parallaxSamples.filter {
-            it.x.isFinite() && it.y.isFinite() && it.disparity.isFinite() &&
-                it.x >= 0.0 && it.x < width && it.y >= 0.0 && it.y < height
-        }
-        val weightedEvidence = relativeParallaxEvidence(usableSamples, width, height)
-        val imageCenterX = width / 2.0
-        val imageCenterY = height / 2.0
-
-        fun centerDistanceSquared(square: CropSquare, x: Double, y: Double): Double {
-            val dx = (square.left + square.right) / 2.0 - x
-            val dy = (square.top + square.bottom) / 2.0 - y
-            return dx * dx + dy * dy
-        }
-
-        if (weightedEvidence.size < MIN_PARALLAX_SAMPLES) {
-            return candidates.minByOrNull {
-                centerDistanceSquared(it, imageCenterX, imageCenterY)
+        for (y in 1..height) {
+            val current = IntArray(width + 1)
+            val rowOffset = (y - 1) * width
+            for (x in 1..width) {
+                if ((mask[rowOffset + x - 1].toInt() and 0xff) != 0) {
+                    current[x] = 1 + minOf(current[x - 1], previous[x], previous[x - 1])
+                    if (current[x] >= side) {
+                        val square = CropSquare(x - side, y - side, x, y)
+                        val distance = centerDistanceSquared(square, targetX, targetY)
+                        if (distance < selectedDistance - SCORE_EPSILON) {
+                            selected = square
+                            selectedDistance = distance
+                        }
+                    }
+                }
             }
+            previous = current
         }
+        return selected
+    }
 
-        val totalWeight = weightedEvidence.sumOf { it.weight }
-        if (totalWeight <= SCORE_EPSILON) {
-            return candidates.minByOrNull {
-                centerDistanceSquared(it, imageCenterX, imageCenterY)
-            }
-        }
-
-        val evidenceCenterX = weightedEvidence.sumOf { it.sample.x * it.weight } / totalWeight
-        val evidenceCenterY = weightedEvidence.sumOf { it.sample.y * it.weight } / totalWeight
-
-        data class CandidateScore(
-            val square: CropSquare,
-            val capturedWeight: Double,
-            val centerDistance: Double
-        )
-
-        val scored = candidates.map { square ->
-            val captured = weightedEvidence.sumOf {
-                if (it.sample.inside(square)) it.weight else 0.0
-            }
-            CandidateScore(
-                square = square,
-                capturedWeight = captured,
-                centerDistance = centerDistanceSquared(square, evidenceCenterX, evidenceCenterY)
-            )
-        }
-        val bestWeight = scored.maxOf { it.capturedWeight }
-        if (bestWeight <= SCORE_EPSILON) {
-            return candidates.minByOrNull {
-                centerDistanceSquared(it, imageCenterX, imageCenterY)
-            }
-        }
-
-        return scored
-            .asSequence()
-            .filter { it.capturedWeight + SCORE_EPSILON >= bestWeight * NEAR_BEST_SCORE_RATIO }
-            .minWithOrNull(
-                compareBy<CandidateScore> { it.centerDistance }
-                    .thenByDescending { it.capturedWeight }
-            )
-            ?.square
+    private fun centerDistanceSquared(square: CropSquare, x: Double, y: Double): Double {
+        val dx = (square.left + square.right) / 2.0 - x
+        val dy = (square.top + square.bottom) / 2.0 - y
+        return dx * dx + dy * dy
     }
 
     private data class WeightedEvidence(
@@ -146,9 +165,6 @@ object Geometry {
     ) {
         fun valueAt(x: Double, y: Double) = xSlope * x + ySlope * y + offset
     }
-
-    private fun ParallaxSample.inside(square: CropSquare) =
-        x >= square.left && x < square.right && y >= square.top && y < square.bottom
 
     /** Robustly removes the dominant background disparity plane. */
     private fun relativeParallaxEvidence(
@@ -174,19 +190,12 @@ object Geometry {
         val nonZero = positive.filter { it > 0.0 }.sorted()
         if (nonZero.size < MIN_PARALLAX_SAMPLES) return emptyList()
 
-        // A single imperfect feature match must not drag the crop by itself.
         val cap = percentile(nonZero, 0.90).coerceAtLeast(SCORE_EPSILON)
         return samples.zip(positive)
             .filter { (_, value) -> value > 0.0 }
             .map { (sample, value) -> WeightedEvidence(sample, min(value, cap)) }
     }
 
-    /**
-     * Fits disparity = a*x + b*y + c with deterministic RANSAC. A least-squares
-     * seed can be pulled toward the foreground and then keep reinforcing the
-     * wrong plane; three-point hypotheses avoid that failure. The model with
-     * the smallest median residual is refined using only its robust inliers.
-     */
     private fun fitDominantPlane(
         samples: List<ParallaxSample>,
         width: Int,

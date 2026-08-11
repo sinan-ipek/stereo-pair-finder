@@ -85,7 +85,7 @@ class PolicyAndOutputTest {
         )
 
         assertEquals(
-            CropSquare(left = 0, top = 4, right = 4, bottom = 8),
+            CropSquare(left = 1, top = 5, right = 4, bottom = 8),
             Geometry.largestValidSquare(
                 mask,
                 width = 4,
@@ -96,7 +96,40 @@ class PolicyAndOutputTest {
     }
 
     @Test
-    fun `an affine background disparity alone falls back to image center`() {
+    fun `movable crop escapes a unique largest square and reaches lower foreground`() {
+        val rows = List(6) { "111111" } + List(4) { "011111" }
+        val mask = rows.joinToString("").map { if (it == '1') 1.toByte() else 0.toByte() }
+            .toByteArray()
+        val background = listOf(
+            ParallaxSample(0.5, 0.5, 20.0),
+            ParallaxSample(2.5, 0.5, 21.0),
+            ParallaxSample(4.5, 0.5, 22.0),
+            ParallaxSample(0.5, 2.5, 20.5),
+            ParallaxSample(2.5, 2.5, 21.5),
+            ParallaxSample(4.5, 2.5, 22.5),
+            ParallaxSample(0.5, 4.5, 21.0),
+            ParallaxSample(4.5, 4.5, 23.0)
+        )
+        val lowerForeground = listOf(
+            ParallaxSample(2.0, 8.0, 8.0),
+            ParallaxSample(3.0, 8.5, 8.5),
+            ParallaxSample(4.0, 9.0, 9.0),
+            ParallaxSample(3.5, 9.5, 8.8)
+        )
+
+        assertEquals(
+            CropSquare(left = 1, top = 5, right = 6, bottom = 10),
+            Geometry.largestValidSquare(
+                mask,
+                width = 6,
+                height = 10,
+                parallaxSamples = background + lowerForeground
+            )
+        )
+    }
+
+    @Test
+    fun `an affine background disparity alone keeps the largest centered crop`() {
         val mask = ByteArray(4 * 8) { 1 }
         val background = (0 until 4).flatMap { y ->
             (0 until 4).map { x ->
