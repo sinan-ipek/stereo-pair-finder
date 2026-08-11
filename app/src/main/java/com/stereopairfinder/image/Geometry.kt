@@ -17,7 +17,7 @@ data class ParallaxSample(
 
 object Geometry {
     private const val SCORE_EPSILON = 1e-9
-    private const val MOVABLE_CROP_RATIO = 0.92
+    private const val MOVABLE_CROP_RATIO = 0.96
     private const val MIN_PARALLAX_SAMPLES = 3
 
     /**
@@ -25,7 +25,7 @@ object Geometry {
      *
      * Without reliable relative-parallax evidence this returns the largest square
      * closest to the image center. When evidence exists, the crop side is reduced
-     * to 92% of the largest valid side. That small size concession gives the crop
+     * to 96% of the largest valid side. That small size concession gives the crop
      * room to move, and the valid square whose center is closest to the relative-
      * parallax centroid is selected.
      */
