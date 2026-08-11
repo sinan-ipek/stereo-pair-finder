@@ -1,6 +1,7 @@
 package com.stereopairfinder.image
 
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -62,6 +63,8 @@ object Geometry {
     private const val PARALLAX_MARGIN_PX = 0.35
     private const val UNIFORMITY_RATIO = 0.80
     private const val UNIFORMITY_MARGIN = 3.0
+    private const val MIN_VERTICAL_RESIDUAL_TOLERANCE_PX = 2.5
+    private const val VERTICAL_RESIDUAL_TOLERANCE_RATIO = 0.003
 
     fun largestValidSquare(
         mask: ByteArray,
@@ -250,6 +253,38 @@ object Geometry {
             crops.left.height == crops.right.height &&
             crops.left.width == crops.left.height &&
             crops.right.width == crops.right.height
+
+    /**
+     * Translation residuals are measured in analysis-image pixels. A fixed
+     * pixel threshold is too strict for full-resolution phone photographs, so
+     * the tolerance follows image height while retaining the old 2.5 px floor
+     * for small analysis images.
+     */
+    fun verticalResidualTolerance(imageHeight: Int): Double {
+        if (imageHeight <= 0) return 0.0
+        return max(
+            MIN_VERTICAL_RESIDUAL_TOLERANCE_PX,
+            imageHeight * VERTICAL_RESIDUAL_TOLERANCE_RATIO
+        )
+    }
+
+    fun verticalAlignmentIsAcceptable(medianResidual: Double, imageHeight: Int): Boolean =
+        medianResidual.isFinite() &&
+            medianResidual <= verticalResidualTolerance(imageHeight)
+
+    fun verticalAlignmentConfidence(
+        medianResidual: Double,
+        imageHeight: Int,
+        reliableMatches: Int
+    ): Double {
+        val tolerance = verticalResidualTolerance(imageHeight)
+        if (!medianResidual.isFinite() || tolerance <= 0.0 || reliableMatches <= 0) return 0.0
+
+        val residualScore = (100.0 - 35.0 * medianResidual / tolerance)
+            .coerceIn(0.0, 100.0)
+        val evidenceScore = reliableMatches / (reliableMatches + 15.0)
+        return residualScore * evidenceScore
+    }
 
     fun median(values: List<Double>): Double {
         if (values.isEmpty()) return Double.POSITIVE_INFINITY

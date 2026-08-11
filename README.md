@@ -14,7 +14,9 @@ iki görüntü kabaca üst, orta ve alt bölgelere ayrılır:
 Perspektif hizalama yalnız analiz kopyalarında paralaks ölçmek için kullanılır;
 önizlemeye ve kaydedilen SBS görüntüsüne homografi uygulanmaz. Çıktıdaki düşey
 hizalama, güvenilir eşleşmelerin ortanca `sağY - solY` farkı kadar saf translation
-ile yapılır. Bu translation görüntüyü warp etmek yerine iki kaynak fotoğrafın
+ile yapılır. Translation sonrası düşey hata sınırı analiz görüntüsünün yüksekliğine
+oranlanır; böylece yüksek çözünürlüklü fotoğraflar küçük ve zararsız birkaç piksellik
+kalıntı nedeniyle reddedilmez. Bu translation görüntüyü warp etmek yerine iki kaynak fotoğrafın
 kırpma başlangıç satırlarını farklı seçerek uygulanır.
 Özgün portre fotoğrafların tam genişliği korunur. Her iki fotoğraf yalnızca
 üstten, alttan veya üstten ve alttan eşit miktarda kırpılır; ardından bozulmamış

@@ -310,6 +310,35 @@ class PolicyAndOutputTest {
         )
     }
 
+    @Test
+    fun `vertical residual tolerance scales with analysis height`() {
+        assertEquals(2.5, Geometry.verticalResidualTolerance(160), 0.0)
+        assertEquals(12.0, Geometry.verticalResidualTolerance(4000), 0.0)
+        assertEquals(6.144, Geometry.verticalResidualTolerance(2048), 0.000_001)
+
+        assertFalse(Geometry.verticalAlignmentIsAcceptable(4.92, 160))
+        assertTrue(Geometry.verticalAlignmentIsAcceptable(4.92, 2048))
+    }
+
+    @Test
+    fun `guitar case keeps a healthy confidence without weakening small images`() {
+        val confidence = Geometry.verticalAlignmentConfidence(
+            medianResidual = 4.92,
+            imageHeight = 2048,
+            reliableMatches = 426
+        )
+
+        assertTrue(confidence >= 60.0)
+        assertTrue(confidence <= 100.0)
+        assertTrue(
+            Geometry.verticalAlignmentConfidence(
+                medianResidual = 4.92,
+                imageHeight = 160,
+                reliableMatches = 426
+            ) < 60.0
+        )
+    }
+
     private fun samples(top: Double, middle: Double, bottom: Double): List<ParallaxSample> =
         bandSamples(y = 15.0, disparity = top) +
             bandSamples(y = 75.0, disparity = middle) +

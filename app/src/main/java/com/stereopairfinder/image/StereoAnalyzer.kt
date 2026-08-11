@@ -236,10 +236,14 @@ class StereoAnalyzer {
                         100.0 * it.width / left.cols()
                     }
 
-                    confidence = (100.0 - median * 15.0).coerceIn(0.0, 100.0) *
-                        (inlierMatches.size / (inlierMatches.size + 15.0))
+                    confidence = Geometry.verticalAlignmentConfidence(
+                        medianResidual = median,
+                        imageHeight = targetH,
+                        reliableMatches = inlierMatches.size
+                    )
 
-                    aligned = median <= 2.5 && area >= .35 &&
+                    aligned = Geometry.verticalAlignmentIsAcceptable(median, targetH) &&
+                        area >= .35 &&
                         sourceCrops != null &&
                         Geometry.outputCropsAreCompatible(sourceCrops)
                     if (aligned) {
