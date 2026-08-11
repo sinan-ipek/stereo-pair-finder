@@ -52,7 +52,7 @@ class PolicyAndOutputTest {
     }
 
     @Test
-    fun `lower parallax keeps the bottom and crops only the top`() {
+    fun `lower parallax favors the bottom with a seventy thirty crop`() {
         val decision = Geometry.verticalCrop(
             fullMask,
             width,
@@ -62,12 +62,12 @@ class PolicyAndOutputTest {
         )
 
         assertNotNull(decision)
-        assertEquals(CropSquare(0, 60, 100, 160), decision!!.square)
-        assertTrue(decision.mode.startsWith("üstten kırp"))
+        assertEquals(CropSquare(0, 42, 100, 142), decision!!.square)
+        assertTrue(decision.mode.startsWith("ağırlıklı üstten kırp"))
     }
 
     @Test
-    fun `upper parallax keeps the top and crops only the bottom`() {
+    fun `upper parallax favors the top with a thirty seventy crop`() {
         val decision = Geometry.verticalCrop(
             fullMask,
             width,
@@ -76,8 +76,8 @@ class PolicyAndOutputTest {
             BandValues(top = 20.0, middle = 20.0, bottom = 20.0)
         )
 
-        assertEquals(CropSquare(0, 0, 100, 100), decision!!.square)
-        assertTrue(decision.mode.startsWith("alttan kırp"))
+        assertEquals(CropSquare(0, 18, 100, 118), decision!!.square)
+        assertTrue(decision.mode.startsWith("ağırlıklı alttan kırp"))
     }
 
     @Test
@@ -118,8 +118,8 @@ class PolicyAndOutputTest {
             BandValues(top = 5.0, middle = 18.0, bottom = 28.0)
         )
 
-        assertEquals(CropSquare(0, 60, 100, 160), decision!!.square)
-        assertEquals("üstten kırp · üst bölge daha tekdüze", decision.mode)
+        assertEquals(CropSquare(0, 42, 100, 142), decision!!.square)
+        assertEquals("ağırlıklı üstten kırp · üst bölge daha tekdüze", decision.mode)
     }
 
     @Test
@@ -132,8 +132,8 @@ class PolicyAndOutputTest {
             BandValues(top = 30.0, middle = 18.0, bottom = 4.0)
         )
 
-        assertEquals(CropSquare(0, 0, 100, 100), decision!!.square)
-        assertEquals("alttan kırp · alt bölge daha tekdüze", decision.mode)
+        assertEquals(CropSquare(0, 18, 100, 118), decision!!.square)
+        assertEquals("ağırlıklı alttan kırp · alt bölge daha tekdüze", decision.mode)
     }
 
     @Test
@@ -146,8 +146,8 @@ class PolicyAndOutputTest {
             BandValues(top = 35.0, middle = 20.0, bottom = 3.0)
         )
 
-        assertEquals(CropSquare(0, 60, 100, 160), decision!!.square)
-        assertEquals("üstten kırp · alt paralaks güçlü", decision.mode)
+        assertEquals(CropSquare(0, 42, 100, 142), decision!!.square)
+        assertEquals("ağırlıklı üstten kırp · alt paralaks güçlü", decision.mode)
     }
 
     @Test
@@ -168,7 +168,7 @@ class PolicyAndOutputTest {
     @Test
     fun `original output crops only rows and preserves every source column`() {
         assertEquals(
-            CropSquare(0, 60, 100, 160),
+            CropSquare(0, 42, 100, 142),
             Geometry.originalCrop(width, height, VerticalCropPlacement.CUT_TOP)
         )
         assertEquals(
@@ -176,7 +176,7 @@ class PolicyAndOutputTest {
             Geometry.originalCrop(width, height, VerticalCropPlacement.CENTER)
         )
         assertEquals(
-            CropSquare(0, 0, 100, 100),
+            CropSquare(0, 18, 100, 118),
             Geometry.originalCrop(width, height, VerticalCropPlacement.CUT_BOTTOM)
         )
         assertNull(Geometry.originalCrop(160, 100, VerticalCropPlacement.CENTER))
@@ -248,10 +248,10 @@ class PolicyAndOutputTest {
             100, 160, 100, 160, 160, 6.0, VerticalCropPlacement.CUT_TOP
         )!!
 
-        assertEquals(0, topKept.left.top)
-        assertEquals(6, topKept.right.top)
-        assertEquals(54, bottomKept.left.top)
-        assertEquals(60, bottomKept.right.top)
+        assertEquals(16, topKept.left.top)
+        assertEquals(22, topKept.right.top)
+        assertEquals(38, bottomKept.left.top)
+        assertEquals(44, bottomKept.right.top)
     }
 
     @Test

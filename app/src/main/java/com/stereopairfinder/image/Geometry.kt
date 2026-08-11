@@ -65,6 +65,9 @@ object Geometry {
     private const val UNIFORMITY_MARGIN = 3.0
     private const val MIN_VERTICAL_RESIDUAL_TOLERANCE_PX = 2.5
     private const val VERTICAL_RESIDUAL_TOLERANCE_RATIO = 0.003
+    private const val CUT_TOP_FRACTION = 0.70
+    private const val CENTER_FRACTION = 0.50
+    private const val CUT_BOTTOM_FRACTION = 0.30
 
     fun largestValidSquare(
         mask: ByteArray,
@@ -115,9 +118,9 @@ object Geometry {
 
         val choice = if (clearParallax) {
             when (winner) {
-                VerticalBand.TOP -> VerticalCropPlacement.CUT_BOTTOM to "alttan kırp · üst paralaks güçlü"
+                VerticalBand.TOP -> VerticalCropPlacement.CUT_BOTTOM to "ağırlıklı alttan kırp · üst paralaks güçlü"
                 VerticalBand.MIDDLE -> VerticalCropPlacement.CENTER to "merkezden kırp · orta paralaks güçlü"
-                VerticalBand.BOTTOM -> VerticalCropPlacement.CUT_TOP to "üstten kırp · alt paralaks güçlü"
+                VerticalBand.BOTTOM -> VerticalCropPlacement.CUT_TOP to "ağırlıklı üstten kırp · alt paralaks güçlü"
             }
         } else {
             uniformityChoice(texture)
@@ -141,8 +144,8 @@ object Geometry {
         val bottomIsFlatter = values.bottom + UNIFORMITY_MARGIN <= values.top &&
             values.bottom <= values.top * UNIFORMITY_RATIO
         return when {
-            topIsFlatter -> VerticalCropPlacement.CUT_TOP to "üstten kırp · üst bölge daha tekdüze"
-            bottomIsFlatter -> VerticalCropPlacement.CUT_BOTTOM to "alttan kırp · alt bölge daha tekdüze"
+            topIsFlatter -> VerticalCropPlacement.CUT_TOP to "ağırlıklı üstten kırp · üst bölge daha tekdüze"
+            bottomIsFlatter -> VerticalCropPlacement.CUT_BOTTOM to "ağırlıklı alttan kırp · alt bölge daha tekdüze"
             else -> VerticalCropPlacement.CENTER to "merkezden kırp · fark belirgin değil"
         }
     }
@@ -157,11 +160,8 @@ object Geometry {
         placement: VerticalCropPlacement
     ): CropSquare? {
         if (width <= 0 || height < width) return null
-        val top = when (placement) {
-            VerticalCropPlacement.CUT_TOP -> height - width
-            VerticalCropPlacement.CENTER -> (height - width) / 2
-            VerticalCropPlacement.CUT_BOTTOM -> 0
-        }
+        val availableTop = (height - width).toDouble()
+        val top = (availableTop * cropStartFraction(placement)).roundToInt()
         return CropSquare(0, top, width, top + width)
     }
 
@@ -202,11 +202,8 @@ object Geometry {
         val maxLeftTop = minOf(leftMaxTop, rightMaxTop - offsetInCropWidths)
         if (maxLeftTop + EPSILON < minLeftTop) return null
 
-        val leftTopInWidths = when (placement) {
-            VerticalCropPlacement.CUT_BOTTOM -> minLeftTop
-            VerticalCropPlacement.CENTER -> (minLeftTop + maxLeftTop) / 2.0
-            VerticalCropPlacement.CUT_TOP -> maxLeftTop
-        }
+        val leftTopInWidths = minLeftTop +
+            (maxLeftTop - minLeftTop) * cropStartFraction(placement)
         val rightTopInWidths = leftTopInWidths + offsetInCropWidths
         val leftTop = (leftTopInWidths * leftWidth).roundToInt()
             .coerceIn(0, leftHeight - leftWidth)
@@ -223,6 +220,17 @@ object Geometry {
         y < height / 3.0 -> VerticalBand.TOP
         y < height * 2.0 / 3.0 -> VerticalBand.MIDDLE
         else -> VerticalBand.BOTTOM
+    }
+
+    /**
+     * Places the square inside the available vertical crop interval without
+     * pinning it to either edge. CUT_TOP removes 70% of the spare rows above
+     * the square and 30% below it; CUT_BOTTOM does the inverse.
+     */
+    private fun cropStartFraction(placement: VerticalCropPlacement): Double = when (placement) {
+        VerticalCropPlacement.CUT_TOP -> CUT_TOP_FRACTION
+        VerticalCropPlacement.CENTER -> CENTER_FRACTION
+        VerticalCropPlacement.CUT_BOTTOM -> CUT_BOTTOM_FRACTION
     }
 
     /** A 10% trimmed mean prevents one bad optical-flow vector owning a band. */
