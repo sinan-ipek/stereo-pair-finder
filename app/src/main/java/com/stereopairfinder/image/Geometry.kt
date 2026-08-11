@@ -2,6 +2,7 @@ package com.stereopairfinder.image
 
 import kotlin.math.abs
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 data class CropSquare(val left: Int, val top: Int, val right: Int, val bottom: Int) {
     val width: Int get() = right - left
@@ -28,15 +29,22 @@ data class BandValues(
 }
 
 enum class VerticalBand { TOP, MIDDLE, BOTTOM }
+enum class VerticalCropPlacement { CUT_TOP, CENTER, CUT_BOTTOM }
 
 data class FramingDecision(
     val square: CropSquare,
+    val placement: VerticalCropPlacement,
     val mode: String,
     val targetX: Double,
     val targetY: Double,
     val parallax: BandValues,
     /** Lower values mean a flatter, more nearly single-colour band. */
     val uniformity: BandValues
+)
+
+data class StereoSourceCrops(
+    val left: CropSquare,
+    val right: CropSquare
 )
 
 /**
@@ -104,17 +112,18 @@ object Geometry {
 
         val choice = if (clearParallax) {
             when (winner) {
-                VerticalBand.TOP -> CropChoice.BOTTOM_CUT to "alttan kırp · üst paralaks güçlü"
-                VerticalBand.MIDDLE -> CropChoice.CENTER to "merkezden kırp · orta paralaks güçlü"
-                VerticalBand.BOTTOM -> CropChoice.TOP_CUT to "üstten kırp · alt paralaks güçlü"
+                VerticalBand.TOP -> VerticalCropPlacement.CUT_BOTTOM to "alttan kırp · üst paralaks güçlü"
+                VerticalBand.MIDDLE -> VerticalCropPlacement.CENTER to "merkezden kırp · orta paralaks güçlü"
+                VerticalBand.BOTTOM -> VerticalCropPlacement.CUT_TOP to "üstten kırp · alt paralaks güçlü"
             }
         } else {
             uniformityChoice(texture)
         }
 
-        val square = cropAt(width, height, choice.first)
+        val square = originalCrop(width, height, choice.first) ?: return null
         return FramingDecision(
             square = square,
+            placement = choice.first,
             mode = choice.second,
             targetX = width / 2.0,
             targetY = (square.top + square.bottom) / 2.0,
@@ -123,33 +132,88 @@ object Geometry {
         )
     }
 
-    private enum class CropChoice { TOP_CUT, CENTER, BOTTOM_CUT }
-
-    private fun uniformityChoice(values: BandValues): Pair<CropChoice, String> {
+    private fun uniformityChoice(values: BandValues): Pair<VerticalCropPlacement, String> {
         val topIsFlatter = values.top + UNIFORMITY_MARGIN <= values.bottom &&
             values.top <= values.bottom * UNIFORMITY_RATIO
         val bottomIsFlatter = values.bottom + UNIFORMITY_MARGIN <= values.top &&
             values.bottom <= values.top * UNIFORMITY_RATIO
         return when {
-            topIsFlatter -> CropChoice.TOP_CUT to "üstten kırp · üst bölge daha tekdüze"
-            bottomIsFlatter -> CropChoice.BOTTOM_CUT to "alttan kırp · alt bölge daha tekdüze"
-            else -> CropChoice.CENTER to "merkezden kırp · fark belirgin değil"
+            topIsFlatter -> VerticalCropPlacement.CUT_TOP to "üstten kırp · üst bölge daha tekdüze"
+            bottomIsFlatter -> VerticalCropPlacement.CUT_BOTTOM to "alttan kırp · alt bölge daha tekdüze"
+            else -> VerticalCropPlacement.CENTER to "merkezden kırp · fark belirgin değil"
         }
     }
 
-    private fun cropAt(width: Int, height: Int, choice: CropChoice): CropSquare {
-        val side = min(width, height)
-        val left = (width - side) / 2
-        val top = if (height <= side) {
-            0
-        } else {
-            when (choice) {
-                CropChoice.TOP_CUT -> height - side
-                CropChoice.CENTER -> (height - side) / 2
-                CropChoice.BOTTOM_CUT -> 0
-            }
+    /**
+     * Returns an unwarped, full-width square crop. Only rows are removed; the
+     * source pixels are never rotated, sheared, perspective-warped or stretched.
+     */
+    fun originalCrop(
+        width: Int,
+        height: Int,
+        placement: VerticalCropPlacement
+    ): CropSquare? {
+        if (width <= 0 || height < width) return null
+        val top = when (placement) {
+            VerticalCropPlacement.CUT_TOP -> height - width
+            VerticalCropPlacement.CENTER -> (height - width) / 2
+            VerticalCropPlacement.CUT_BOTTOM -> 0
         }
-        return CropSquare(left, top, left + side, top + side)
+        return CropSquare(0, top, width, top + width)
+    }
+
+    /**
+     * Produces full-width square source crops whose different top rows apply a
+     * pure vertical translation. No source pixel is warped or resampled here.
+     *
+     * [verticalOffsetInAnalysis] is median(rightY - leftY), measured in the
+     * shared analysis image. A positive value makes the right crop start lower.
+     */
+    fun translatedSourceCrops(
+        leftWidth: Int,
+        leftHeight: Int,
+        rightWidth: Int,
+        rightHeight: Int,
+        analysisHeight: Int,
+        verticalOffsetInAnalysis: Double,
+        placement: VerticalCropPlacement
+    ): StereoSourceCrops? {
+        if (
+            leftWidth <= 0 || rightWidth <= 0 ||
+            leftHeight < leftWidth || rightHeight < rightWidth ||
+            analysisHeight <= 0 || !verticalOffsetInAnalysis.isFinite()
+        ) return null
+
+        val leftAspect = leftHeight.toDouble() / leftWidth
+        val rightAspect = rightHeight.toDouble() / rightWidth
+        // Refuse a mismatched pair instead of silently stretching either image.
+        if (abs(leftAspect - rightAspect) > 0.01) return null
+
+        val aspect = (leftAspect + rightAspect) / 2.0
+        val offsetInCropWidths = verticalOffsetInAnalysis * aspect / analysisHeight
+        val leftMaxTop = (leftHeight - leftWidth).toDouble() / leftWidth
+        val rightMaxTop = (rightHeight - rightWidth).toDouble() / rightWidth
+
+        // rightTop/rightWidth = leftTop/leftWidth + offsetInCropWidths
+        val minLeftTop = maxOf(0.0, -offsetInCropWidths)
+        val maxLeftTop = minOf(leftMaxTop, rightMaxTop - offsetInCropWidths)
+        if (maxLeftTop + EPSILON < minLeftTop) return null
+
+        val leftTopInWidths = when (placement) {
+            VerticalCropPlacement.CUT_BOTTOM -> minLeftTop
+            VerticalCropPlacement.CENTER -> (minLeftTop + maxLeftTop) / 2.0
+            VerticalCropPlacement.CUT_TOP -> maxLeftTop
+        }
+        val rightTopInWidths = leftTopInWidths + offsetInCropWidths
+        val leftTop = (leftTopInWidths * leftWidth).roundToInt()
+            .coerceIn(0, leftHeight - leftWidth)
+        val rightTop = (rightTopInWidths * rightWidth).roundToInt()
+            .coerceIn(0, rightHeight - rightWidth)
+
+        return StereoSourceCrops(
+            left = CropSquare(0, leftTop, leftWidth, leftTop + leftWidth),
+            right = CropSquare(0, rightTop, rightWidth, rightTop + rightWidth)
+        )
     }
 
     private fun bandAt(y: Double, height: Int): VerticalBand = when {
@@ -175,6 +239,17 @@ object Geometry {
     )
 
     fun outputSide(sourceSide: Int) = min(sourceSide, 2048)
+
+    /**
+     * The saved SBS is assembled without resizing either eye. If the two
+     * source crops do not already have identical pixel dimensions, the pair is
+     * rejected instead of scaling, stretching or padding one side.
+     */
+    fun outputCropsAreCompatible(crops: StereoSourceCrops): Boolean =
+        crops.left.width == crops.right.width &&
+            crops.left.height == crops.right.height &&
+            crops.left.width == crops.left.height &&
+            crops.right.width == crops.right.height
 
     fun median(values: List<Double>): Double {
         if (values.isEmpty()) return Double.POSITIVE_INFINITY

@@ -35,13 +35,15 @@ class StereoAnalyzer {
 
         val targetW = min(left.cols(), right.cols())
         val targetH = min(left.rows(), right.rows())
-        Imgproc.resize(left, left, Size(targetW.toDouble(), targetH.toDouble()))
-        Imgproc.resize(right, right, Size(targetW.toDouble(), targetH.toDouble()))
+        val analysisL = Mat()
+        val analysisR = Mat()
+        Imgproc.resize(left, analysisL, Size(targetW.toDouble(), targetH.toDouble()))
+        Imgproc.resize(right, analysisR, Size(targetW.toDouble(), targetH.toDouble()))
 
         val grayL = Mat()
         val grayR = Mat()
-        Imgproc.cvtColor(left, grayL, Imgproc.COLOR_RGBA2GRAY)
-        Imgproc.cvtColor(right, grayR, Imgproc.COLOR_RGBA2GRAY)
+        Imgproc.cvtColor(analysisL, grayL, Imgproc.COLOR_RGBA2GRAY)
+        Imgproc.cvtColor(analysisR, grayR, Imgproc.COLOR_RGBA2GRAY)
 
         val orb = ORB.create(2500)
         val kpL = MatOfKeyPoint()
@@ -98,6 +100,7 @@ class StereoAnalyzer {
         var sbs: Bitmap? = null
         var alignedL: Bitmap? = null
         var alignedR: Bitmap? = null
+        var verticalTranslation = 0.0
         var cropCenterXPercent: Double? = null
         var cropCenterYPercent: Double? = null
         var cropSidePercent: Double? = null
@@ -109,8 +112,22 @@ class StereoAnalyzer {
         if (evidence && !fundamental.empty()) {
             val inL = MatOfPoint2f()
             val inR = MatOfPoint2f()
-            inL.fromList(inlierMatches.map { pL[it.queryIdx].pt })
-            inR.fromList(inlierMatches.map { pR[it.trainIdx].pt })
+            val inlierLeftPoints = inlierMatches.map { pL[it.queryIdx].pt }
+            val inlierRightPoints = inlierMatches.map { pR[it.trainIdx].pt }
+            inL.fromList(inlierLeftPoints)
+            inR.fromList(inlierRightPoints)
+
+            val verticalOffsets = inlierLeftPoints.zip(inlierRightPoints)
+                .map { (leftPoint, rightPoint) -> rightPoint.y - leftPoint.y }
+            verticalTranslation = Geometry.median(verticalOffsets)
+            median = Geometry.median(
+                verticalOffsets.map { abs(it - verticalTranslation) }
+            )
+            area = if (verticalTranslation.isFinite()) {
+                (1.0 - abs(verticalTranslation) / targetH).coerceIn(0.0, 1.0)
+            } else {
+                0.0
+            }
 
             val h1 = Mat()
             val h2 = Mat()
@@ -125,11 +142,6 @@ class StereoAnalyzer {
             )
 
             if (ok && sane(h1) && sane(h2)) {
-                val warpL = Mat()
-                val warpR = Mat()
-                Imgproc.warpPerspective(left, warpL, h1, Size(targetW.toDouble(), targetH.toDouble()))
-                Imgproc.warpPerspective(right, warpR, h2, Size(targetW.toDouble(), targetH.toDouble()))
-
                 val one = Mat.ones(targetH, targetW, CvType.CV_8U)
                 val m1 = Mat()
                 val m2 = Mat()
@@ -150,7 +162,6 @@ class StereoAnalyzer {
 
                 val common = Mat()
                 Core.bitwise_and(m1, m2, common)
-                area = Core.countNonZero(common).toDouble() / (targetW * targetH)
 
                 val validPixels = ByteArray(targetW * targetH)
                 common.get(0, 0, validPixels)
@@ -161,9 +172,6 @@ class StereoAnalyzer {
                 Core.perspectiveTransform(inR, transformedR, h2)
                 val rectifiedPairs = transformedL.toArray().zip(transformedR.toArray())
 
-                median = Geometry.median(
-                    rectifiedPairs.map { abs(it.first.y - it.second.y) }
-                )
                 val featureSamples = rectifiedPairs.map { (leftPoint, rightPoint) ->
                     ParallaxSample(
                         x = (leftPoint.x + rightPoint.x) / 2.0,
@@ -204,28 +212,56 @@ class StereoAnalyzer {
                     parallaxSamples,
                     uniformity
                 )
-                val square = framing?.square
-
-                if (square != null) {
+                if (framing != null) {
                     framingMode = framing.mode
                     parallaxBands = framing.parallax
                     uniformityBands = framing.uniformity
-                    cropCenterXPercent = 100.0 * (square.left + square.right) / 2.0 / targetW
-                    cropCenterYPercent = 100.0 * (square.top + square.bottom) / 2.0 / targetH
-                    cropSidePercent = 100.0 * square.width / min(targetW, targetH)
+                    val sourceCrops = Geometry.translatedSourceCrops(
+                        left.cols(),
+                        left.rows(),
+                        right.cols(),
+                        right.rows(),
+                        targetH,
+                        verticalTranslation,
+                        framing.placement
+                    )
+                    val sourceCropL = sourceCrops?.left
+                    val sourceCropR = sourceCrops?.right
+
+                    cropCenterXPercent = 50.0
+                    cropCenterYPercent = sourceCropL?.let {
+                        100.0 * (it.top + it.bottom) / 2.0 / left.rows()
+                    }
+                    cropSidePercent = sourceCropL?.let {
+                        100.0 * it.width / left.cols()
+                    }
 
                     confidence = (100.0 - median * 15.0).coerceIn(0.0, 100.0) *
                         (inlierMatches.size / (inlierMatches.size + 15.0))
 
-                    aligned = median <= 2.5 && area >= .35
+                    aligned = median <= 2.5 && area >= .35 &&
+                        sourceCrops != null &&
+                        Geometry.outputCropsAreCompatible(sourceCrops)
                     if (aligned) {
-                        val cropL = warpL.submat(square.top, square.bottom, square.left, square.right)
-                        val cropR = warpR.submat(square.top, square.bottom, square.left, square.right)
-                        val side = Geometry.outputSide(square.width)
+                        // Different source top rows apply pure vertical
+                        // translation. Output pixels never pass through a
+                        // homography, rotation, shear or perspective warp.
+                        val cropL = left.submat(
+                            sourceCropL!!.top,
+                            sourceCropL.bottom,
+                            sourceCropL.left,
+                            sourceCropL.right
+                        )
+                        val cropR = right.submat(
+                            sourceCropR!!.top,
+                            sourceCropR.bottom,
+                            sourceCropR.left,
+                            sourceCropR.right
+                        )
                         val outL = Mat()
                         val outR = Mat()
-                        Imgproc.resize(cropL, outL, Size(side.toDouble(), side.toDouble()))
-                        Imgproc.resize(cropR, outR, Size(side.toDouble(), side.toDouble()))
+                        cropL.copyTo(outL)
+                        cropR.copyTo(outR)
 
                         alignedL = outL.bitmap()
                         alignedR = outR.bitmap()
@@ -243,8 +279,6 @@ class StereoAnalyzer {
 
                 transformedL.release()
                 transformedR.release()
-                warpL.release()
-                warpR.release()
                 one.release()
                 m1.release()
                 m2.release()
@@ -268,7 +302,22 @@ class StereoAnalyzer {
             threshold
         )
 
-        listOf(left, right, grayL, grayR, kpL, kpR, dL, dR, src, dst, mask, fundamental)
+        listOf(
+            left,
+            right,
+            analysisL,
+            analysisR,
+            grayL,
+            grayR,
+            kpL,
+            kpR,
+            dL,
+            dR,
+            src,
+            dst,
+            mask,
+            fundamental
+        )
             .forEach { it.release() }
 
         return AnalysisResult(
@@ -277,6 +326,7 @@ class StereoAnalyzer {
             reliableMatches = inlierMatches.size,
             alignmentConfidence = confidence,
             medianVerticalError = median,
+            verticalTranslationPx = verticalTranslation,
             commonAreaRatio = area,
             status = status,
             leftPreview = alignedL ?: leftBitmap,

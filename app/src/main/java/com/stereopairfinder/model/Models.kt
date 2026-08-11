@@ -32,6 +32,7 @@ data class AnalysisResult(
     val reliableMatches: Int,
     val alignmentConfidence: Double,
     val medianVerticalError: Double,
+    val verticalTranslationPx: Double = 0.0,
     val commonAreaRatio: Double,
     val status: PairStatus,
     val leftPreview: Bitmap?,

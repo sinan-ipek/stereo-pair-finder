@@ -12,8 +12,8 @@ android {
         applicationId = "com.stereopairfinder"
         minSdk = 29
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.6-three-band-crop"
+        versionCode = 9
+        versionName = "1.7-translation-only"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

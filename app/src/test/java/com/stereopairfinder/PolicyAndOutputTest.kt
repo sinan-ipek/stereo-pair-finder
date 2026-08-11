@@ -6,6 +6,8 @@ import com.stereopairfinder.image.BandValues
 import com.stereopairfinder.image.CropSquare
 import com.stereopairfinder.image.Geometry
 import com.stereopairfinder.image.ParallaxSample
+import com.stereopairfinder.image.StereoSourceCrops
+import com.stereopairfinder.image.VerticalCropPlacement
 import com.stereopairfinder.model.CameraFolderPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -149,7 +151,7 @@ class PolicyAndOutputTest {
     }
 
     @Test
-    fun `portrait crop preserves the complete image width`() {
+    fun `portrait crop preserves the complete image width when it is valid`() {
         val decision = Geometry.verticalCrop(
             fullMask,
             width,
@@ -161,6 +163,129 @@ class PolicyAndOutputTest {
         assertEquals(0, decision!!.square.left)
         assertEquals(width, decision.square.right)
         assertEquals(width, decision.square.width)
+    }
+
+    @Test
+    fun `original output crops only rows and preserves every source column`() {
+        assertEquals(
+            CropSquare(0, 60, 100, 160),
+            Geometry.originalCrop(width, height, VerticalCropPlacement.CUT_TOP)
+        )
+        assertEquals(
+            CropSquare(0, 30, 100, 130),
+            Geometry.originalCrop(width, height, VerticalCropPlacement.CENTER)
+        )
+        assertEquals(
+            CropSquare(0, 0, 100, 100),
+            Geometry.originalCrop(width, height, VerticalCropPlacement.CUT_BOTTOM)
+        )
+        assertNull(Geometry.originalCrop(160, 100, VerticalCropPlacement.CENTER))
+    }
+
+    @Test
+    fun `positive vertical translation uses a lower start row in the right image`() {
+        val crops = Geometry.translatedSourceCrops(
+            leftWidth = 100,
+            leftHeight = 160,
+            rightWidth = 100,
+            rightHeight = 160,
+            analysisHeight = 160,
+            verticalOffsetInAnalysis = 6.0,
+            placement = VerticalCropPlacement.CENTER
+        )
+
+        assertNotNull(crops)
+        assertEquals(CropSquare(0, 27, 100, 127), crops!!.left)
+        assertEquals(CropSquare(0, 33, 100, 133), crops.right)
+        assertEquals(6, crops.right.top - crops.left.top)
+    }
+
+    @Test
+    fun `negative vertical translation uses a lower start row in the left image`() {
+        val crops = Geometry.translatedSourceCrops(
+            leftWidth = 100,
+            leftHeight = 160,
+            rightWidth = 100,
+            rightHeight = 160,
+            analysisHeight = 160,
+            verticalOffsetInAnalysis = -7.0,
+            placement = VerticalCropPlacement.CENTER
+        )
+
+        assertNotNull(crops)
+        assertTrue(kotlin.math.abs((crops!!.left.top - crops.right.top) - 7) <= 1)
+        assertEquals(0, crops.left.left)
+        assertEquals(100, crops.left.right)
+        assertEquals(0, crops.right.left)
+        assertEquals(100, crops.right.right)
+    }
+
+    @Test
+    fun `translation is scaled independently for equal-aspect source sizes`() {
+        val crops = Geometry.translatedSourceCrops(
+            leftWidth = 100,
+            leftHeight = 160,
+            rightWidth = 200,
+            rightHeight = 320,
+            analysisHeight = 160,
+            verticalOffsetInAnalysis = 6.0,
+            placement = VerticalCropPlacement.CENTER
+        )
+
+        assertNotNull(crops)
+        assertEquals(CropSquare(0, 27, 100, 127), crops!!.left)
+        assertEquals(CropSquare(0, 66, 200, 266), crops.right)
+        assertEquals(crops.left.width, crops.left.height)
+        assertEquals(crops.right.width, crops.right.height)
+    }
+
+    @Test
+    fun `translation respects top center and bottom crop choices`() {
+        val topKept = Geometry.translatedSourceCrops(
+            100, 160, 100, 160, 160, 6.0, VerticalCropPlacement.CUT_BOTTOM
+        )!!
+        val bottomKept = Geometry.translatedSourceCrops(
+            100, 160, 100, 160, 160, 6.0, VerticalCropPlacement.CUT_TOP
+        )!!
+
+        assertEquals(0, topKept.left.top)
+        assertEquals(6, topKept.right.top)
+        assertEquals(54, bottomKept.left.top)
+        assertEquals(60, bottomKept.right.top)
+    }
+
+    @Test
+    fun `translation never accepts an impossible offset or mismatched aspect ratio`() {
+        assertNull(
+            Geometry.translatedSourceCrops(
+                100, 160, 100, 160, 160, 80.0, VerticalCropPlacement.CENTER
+            )
+        )
+        assertNull(
+            Geometry.translatedSourceCrops(
+                100, 160, 100, 170, 160, 2.0, VerticalCropPlacement.CENTER
+            )
+        )
+    }
+
+    @Test
+    fun `output accepts only equal square crops and never relies on resizing`() {
+        assertTrue(
+            Geometry.outputCropsAreCompatible(
+                StereoSourceCrops(
+                    CropSquare(0, 20, 100, 120),
+                    CropSquare(0, 26, 100, 126)
+                )
+            )
+        )
+        assertFalse(
+            Geometry.outputCropsAreCompatible(
+                StereoSourceCrops(
+                    CropSquare(0, 20, 100, 120),
+                    CropSquare(0, 52, 200, 252)
+                )
+            )
+        )
     }
 
     @Test
