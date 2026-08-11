@@ -157,7 +157,7 @@ class StereoAnalyzer {
                     ParallaxSample(
                         x = (leftPoint.x + rightPoint.x) / 2.0,
                         y = (leftPoint.y + rightPoint.y) / 2.0,
-                        disparity = abs(leftPoint.x - rightPoint.x)
+                        disparity = leftPoint.x - rightPoint.x
                     )
                 }
                 val square = Geometry.largestValidSquare(
