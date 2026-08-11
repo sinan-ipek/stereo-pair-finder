@@ -44,6 +44,7 @@ class PhotoReader(private val resolver: ContentResolver) {
         resolver.openFileDescriptor(uri, "r")!!.use {
             BitmapFactory.decodeFileDescriptor(it.fileDescriptor, null, bounds)
         }
+        require(bounds.outWidth > 0 && bounds.outHeight > 0) { "Fotoğraf boyutu okunamadı" }
 
         var sample = 1
         while (max(bounds.outWidth, bounds.outHeight) / sample > maxSide * 2) sample *= 2

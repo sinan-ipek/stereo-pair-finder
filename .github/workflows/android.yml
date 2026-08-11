@@ -29,6 +29,6 @@ jobs:
         run: gradle assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: stereo-pair-finder-1.9-balanced-crop
+          name: stereo-pair-finder-2.0-gallery-scan
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
