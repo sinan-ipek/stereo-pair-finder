@@ -141,18 +141,33 @@ class StereoAnalyzer {
 
                 val validPixels = ByteArray(targetW * targetH)
                 common.get(0, 0, validPixels)
-                val square = Geometry.largestValidSquare(validPixels, targetW, targetH)
+
+                val transformedL = MatOfPoint2f()
+                val transformedR = MatOfPoint2f()
+                Core.perspectiveTransform(inL, transformedL, h1)
+                Core.perspectiveTransform(inR, transformedR, h2)
+                val rectifiedLeftPoints = transformedL.toArray()
+                val rectifiedRightPoints = transformedR.toArray()
+                val rectifiedPairs = rectifiedLeftPoints.zip(rectifiedRightPoints)
+
+                median = Geometry.median(
+                    rectifiedPairs.map { abs(it.first.y - it.second.y) }
+                )
+                val parallaxSamples = rectifiedPairs.map { (leftPoint, rightPoint) ->
+                    ParallaxSample(
+                        x = (leftPoint.x + rightPoint.x) / 2.0,
+                        y = (leftPoint.y + rightPoint.y) / 2.0,
+                        disparity = abs(leftPoint.x - rightPoint.x)
+                    )
+                }
+                val square = Geometry.largestValidSquare(
+                    validPixels,
+                    targetW,
+                    targetH,
+                    parallaxSamples
+                )
 
                 if (square != null) {
-                    val transformedL = MatOfPoint2f()
-                    val transformedR = MatOfPoint2f()
-                    Core.perspectiveTransform(inL, transformedL, h1)
-                    Core.perspectiveTransform(inR, transformedR, h2)
-                    median = Geometry.median(
-                        transformedL.toArray().zip(transformedR.toArray()).map {
-                            abs(it.first.y - it.second.y)
-                        }
-                    )
                     confidence = (100.0 - median * 15.0).coerceIn(0.0, 100.0) *
                         (inlierMatches.size / (inlierMatches.size + 15.0))
 
@@ -178,11 +193,10 @@ class StereoAnalyzer {
                         cropL.release()
                         cropR.release()
                     }
-
-                    transformedL.release()
-                    transformedR.release()
                 }
 
+                transformedL.release()
+                transformedR.release()
                 warpL.release()
                 warpR.release()
                 one.release()
