@@ -137,7 +137,11 @@ object Geometry {
         return selected
     }
 
+    /** UI preview stays memory-friendly. */
     fun outputSide(sourceSide: Int) = min(sourceSide, 2048)
+
+    /** Full saved eye image. 3072 preserves a normal 4032x3024 camera frame without upscaling. */
+    fun fullOutputSide(sourceSide: Int) = min(sourceSide, 3072)
 
     fun median(values: List<Double>): Double {
         if (values.isEmpty()) return Double.POSITIVE_INFINITY
