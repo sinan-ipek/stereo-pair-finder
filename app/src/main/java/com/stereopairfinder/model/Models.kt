@@ -18,8 +18,9 @@ enum class PairStatus(val text: String) {
 data class AnalysisResult(
     val pair: PairCandidate, val similarity: Double, val reliableMatches: Int,
     val alignmentConfidence: Double, val medianVerticalError: Double, val commonAreaRatio: Double,
-    val status: PairStatus, val leftPreview: Bitmap?, val rightPreview: Bitmap?, val sbsPreview: Bitmap?
-) { val saveable get() = status == PairStatus.MATCHED }
+    val status: PairStatus, val leftPreview: Bitmap?, val rightPreview: Bitmap?, val sbsPreview: Bitmap?,
+    val sbsJpeg: ByteArray? = null
+) { val saveable get() = status == PairStatus.MATCHED && sbsJpeg != null }
 
 object PairPolicy {
     fun sorted(photos: List<Photo>) = photos.sortedWith(compareBy<Photo> { it.takenAtMillis == null }.thenBy { it.takenAtMillis ?: Long.MAX_VALUE }.thenBy { it.tie })
