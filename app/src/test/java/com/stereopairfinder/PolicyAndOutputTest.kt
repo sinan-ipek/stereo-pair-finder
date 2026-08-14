@@ -28,7 +28,7 @@ class PolicyAndOutputTest {
     }
 
     @Test
-    fun `output names are unique and dimensions remain bounded`() {
+    fun `output names are unique and preview and full dimensions remain bounded`() {
         val saver = SbsSaver(mock(ContentResolver::class.java))
         val now = Instant.EPOCH
         assertNotEquals(
@@ -37,9 +37,11 @@ class PolicyAndOutputTest {
         )
         assertEquals(2048, Geometry.outputSide(5000))
         assertEquals(640, Geometry.outputSide(640))
+        assertEquals(3072, Geometry.fullOutputSide(5000))
+        assertEquals(3024, Geometry.fullOutputSide(3024))
         assertEquals(
             2.0,
-            (Geometry.outputSide(5000) * 2).toDouble() / Geometry.outputSide(5000),
+            (Geometry.fullOutputSide(3024) * 2).toDouble() / Geometry.fullOutputSide(3024),
             0.0
         )
     }
