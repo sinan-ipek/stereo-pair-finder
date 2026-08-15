@@ -12,8 +12,8 @@ android {
         applicationId = "com.stereopairfinder"
         minSdk = 29
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.4-stereo-pair-scoring"
+        versionCode = 6
+        versionName = "1.5-framing-controls"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
