@@ -10,20 +10,23 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.stereopairfinder.model.AnalysisResult
+import com.stereopairfinder.model.*
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -31,11 +34,7 @@ import java.time.format.DateTimeFormatter
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            MaterialTheme {
-                Screen()
-            }
-        }
+        setContent { MaterialTheme { Screen() } }
     }
 }
 
@@ -44,6 +43,7 @@ class MainActivity : ComponentActivity() {
 fun Screen(vm: MainViewModel = viewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val snackbar = remember { SnackbarHostState() }
     val readPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         Manifest.permission.READ_MEDIA_IMAGES
     } else {
@@ -55,22 +55,46 @@ fun Screen(vm: MainViewModel = viewModel()) {
             ContextCompat.checkSelfPermission(context, readPermission) == PackageManager.PERMISSION_GRANTED
         )
     }
+    var showScanSettings by remember { mutableStateOf(false) }
+    var pendingScanSettings by remember { mutableStateOf(ScanSettings()) }
+
+    LaunchedEffect(state.message) {
+        state.message?.let { message ->
+            snackbar.showSnackbar(message)
+            vm.clearMessage()
+        }
+    }
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(2)
-    ) { uris ->
-        vm.select(uris)
-    }
+    ) { uris -> vm.select(uris) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         hasFullPhotoPermission = granted
-        if (granted) vm.scanAll() else vm.permissionDenied()
+        if (granted) vm.scanAll(pendingScanSettings) else vm.permissionDenied()
+    }
+
+    if (showScanSettings) {
+        ScanSettingsDialog(
+            initial = pendingScanSettings,
+            onDismiss = { showScanSettings = false },
+            onStart = { settings ->
+                pendingScanSettings = settings
+                showScanSettings = false
+                if (hasFullPhotoPermission) {
+                    vm.scanAll(settings)
+                } else {
+                    permissionLauncher.launch(readPermission)
+                }
+            }
+        )
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Stereo Pair Finder") }) }
+        topBar = { TopAppBar(title = { Text("Stereo Pair Finder") }) },
+        snackbarHost = { SnackbarHost(snackbar) }
     ) { padding ->
         LazyColumn(
             modifier = Modifier
@@ -79,15 +103,6 @@ fun Screen(vm: MainViewModel = viewModel()) {
                 .fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            item {
-                Card {
-                    Text(
-                        "İki çalışma biçimi vardır: İsterseniz bir stereo çifti kendiniz seçin, isterseniz galeriyi otomatik taratın. Manuel seçimde zaman ve benzerlik eşikleri uygulanmaz; görüntülerin gerçek eşleşmeleri ve rigid hizalama doğrudan denenir.",
-                        Modifier.padding(14.dp)
-                    )
-                }
-            }
-
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -106,13 +121,7 @@ fun Screen(vm: MainViewModel = viewModel()) {
                     }
 
                     Button(
-                        onClick = {
-                            if (hasFullPhotoPermission) {
-                                vm.scanAll()
-                            } else {
-                                permissionLauncher.launch(readPermission)
-                            }
-                        },
+                        onClick = { showScanSettings = true },
                         enabled = !state.busy,
                         modifier = Modifier.weight(1f)
                     ) {
@@ -132,32 +141,6 @@ fun Screen(vm: MainViewModel = viewModel()) {
                         Text("Seçilen çifti incele")
                     }
                 }
-                if (!hasFullPhotoPermission) {
-                    Text(
-                        "Galeri taraması için izin sorulduğunda ‘Tüm fotoğraflara izin ver’ seçeneğini seçin. Manuel çift seçimi bu izne ihtiyaç duymaz.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-
-            item {
-                Text("Otomatik tarama · azami zaman farkı: ${state.maxSeconds} saniye")
-                Slider(
-                    value = state.maxSeconds.toFloat(),
-                    onValueChange = { vm.maxSeconds(it.toInt()) },
-                    valueRange = 1f..60f,
-                    steps = 58,
-                    enabled = !state.busy
-                )
-
-                Text("Otomatik tarama · benzerlik eşiği: %${state.similarity}")
-                Slider(
-                    value = state.similarity.toFloat(),
-                    onValueChange = { vm.similarity(it.toInt()) },
-                    valueRange = 1f..100f,
-                    steps = 98,
-                    enabled = !state.busy
-                )
             }
 
             item {
@@ -167,43 +150,34 @@ fun Screen(vm: MainViewModel = viewModel()) {
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(Modifier.height(8.dp))
-                    OutlinedButton(onClick = vm::cancel) {
-                        Text("İptal")
-                    }
+                    OutlinedButton(onClick = vm::cancel) { Text("İptal") }
                 }
-
                 Text(state.stage)
-                state.message?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error)
-                }
             }
 
             if (state.photoCount > 0) {
                 item {
                     Text("Bulunan fotoğraf: ${state.photoCount}")
-                    Text("Zaman filtresinden geçen olası çift: ${state.candidateCount}")
+                    Text("Olası çift: ${state.candidateCount}")
                     Text("Stereo eşleşme: ${state.matchedCount}")
                     Text("Kaydedilen SBS: ${state.savedCount}")
-                    if (state.failedCount > 0) {
-                        Text("Atlanan/hata veren işlem: ${state.failedCount}")
-                    }
+                    if (state.failedCount > 0) Text("Atlanan/hata veren: ${state.failedCount}")
                 }
             }
 
             if (state.results.isNotEmpty()) {
                 items(state.results, key = { it.pair.index }) { result ->
-                    ResultCard(result, vm::save)
+                    ResultCard(
+                        result = result,
+                        busy = state.busy,
+                        onSave = vm::save
+                    )
                 }
             }
 
             item {
                 Text(
-                    "Hizalama yalnızca x-y kaydırma ile yapılır. Çok küçük bir kamera roll farkı ölçülür ve dikey hizalamayı açıkça iyileştirirse en fazla ±1° döndürme kullanılabilir. Perspective, shear, stretching ve bağımsız scale uygulanmaz.",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Galeri taramasında eşleşen dosyalar Pictures/Stereo SBS Test/ klasörüne yüksek çözünürlüklü JPEG olarak otomatik kaydedilir. Bu çıktı klasörü sonraki taramalarda kaynak olarak kullanılmaz.",
+                    "Hizalama yalnızca translation ile yapılır; yalnızca belirgin fayda sağlarsa en fazla ±1° küçük rotation kullanılır. Perspective, shear ve stretching uygulanmaz.",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
@@ -212,11 +186,98 @@ fun Screen(vm: MainViewModel = viewModel()) {
 }
 
 @Composable
+private fun ScanSettingsDialog(
+    initial: ScanSettings,
+    onDismiss: () -> Unit,
+    onStart: (ScanSettings) -> Unit
+) {
+    var cropMode by remember { mutableStateOf(initial.render.cropMode) }
+    var verticalBias by remember { mutableFloatStateOf(initial.render.verticalBias) }
+    var maxSeconds by remember { mutableIntStateOf(initial.maxSeconds) }
+    var similarity by remember { mutableIntStateOf(initial.similarity) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Tarama ayarları") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Kadraj")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (cropMode == CropMode.FIT) {
+                        Button(onClick = { cropMode = CropMode.FIT }) { Text("Fit") }
+                        OutlinedButton(onClick = { cropMode = CropMode.FILL }) { Text("Fill") }
+                    } else {
+                        OutlinedButton(onClick = { cropMode = CropMode.FIT }) { Text("Fit") }
+                        Button(onClick = { cropMode = CropMode.FILL }) { Text("Fill") }
+                    }
+                }
+                Text(
+                    if (cropMode == CropMode.FIT) "Fit: ortak alanı mümkün olduğunca korur."
+                    else "Fill: kareyi doldurur; gerekirse üstten/alttan kırpar.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+
+                Text("Dikey kadraj")
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FramingButton("Yukarı", verticalBias == -0.5f) { verticalBias = -0.5f }
+                    FramingButton("Ortala", verticalBias == 0f) { verticalBias = 0f }
+                    FramingButton("Aşağı", verticalBias == 0.5f) { verticalBias = 0.5f }
+                }
+
+                Text("Azami zaman farkı: $maxSeconds saniye")
+                Slider(
+                    value = maxSeconds.toFloat(),
+                    onValueChange = { maxSeconds = it.toInt() },
+                    valueRange = 1f..60f,
+                    steps = 58
+                )
+
+                Text("Benzerlik eşiği: %$similarity")
+                Slider(
+                    value = similarity.toFloat(),
+                    onValueChange = { similarity = it.toInt() },
+                    valueRange = 1f..100f,
+                    steps = 98
+                )
+
+                Text(
+                    "Tarama başladıktan sonra tüm eşleşmeler bu ayarlarla otomatik hazırlanıp kaydedilir.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onStart(
+                        ScanSettings(
+                            render = RenderSettings(cropMode, verticalBias),
+                            maxSeconds = maxSeconds,
+                            similarity = similarity
+                        )
+                    )
+                }
+            ) { Text("Taramayı başlat") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("İptal") } }
+    )
+}
+
+@Composable
+private fun FramingButton(label: String, selected: Boolean, onClick: () -> Unit) {
+    if (selected) Button(onClick = onClick) { Text(label) }
+    else OutlinedButton(onClick = onClick) { Text(label) }
+}
+
+@Composable
 private fun ResultCard(
     result: AnalysisResult,
-    onSave: (AnalysisResult) -> Unit
+    busy: Boolean,
+    onSave: (AnalysisResult, RenderSettings) -> Unit
 ) {
-    var showRight by remember { mutableStateOf(false) }
+    var showRight by remember(result.pair.index) { mutableStateOf(false) }
+    var cropMode by remember(result.pair.index) { mutableStateOf(CropMode.FIT) }
+    var verticalBias by remember(result.pair.index) { mutableFloatStateOf(0f) }
     val formatter = remember {
         DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss.SSS")
             .withZone(ZoneId.systemDefault())
@@ -228,74 +289,96 @@ private fun ResultCard(
     Card {
         Column(
             modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
                 "Çift ${result.pair.index}: ${result.status.text}",
                 style = MaterialTheme.typography.titleMedium
             )
-
-            Row(Modifier.height(110.dp)) {
-                result.leftPreview?.let { bitmap ->
-                    Image(
-                        bitmap.asImageBitmap(),
-                        "Sol fotoğraf",
-                        Modifier.weight(1f).fillMaxHeight(),
-                        contentScale = ContentScale.Crop
-                    )
-                }
-                result.rightPreview?.let { bitmap ->
-                    Image(
-                        bitmap.asImageBitmap(),
-                        "Sağ fotoğraf",
-                        Modifier.weight(1f).fillMaxHeight(),
-                        contentScale = ContentScale.Crop
-                    )
-                }
-            }
-
             Text("Sol: ${formatTime(result.pair.left.takenAtMillis)}")
             Text("Sağ: ${formatTime(result.pair.right.takenAtMillis)}")
-            Text("Zaman farkı: ${result.pair.seconds?.let { "%.3f sn".format(it) } ?: "—"}")
             Text(
-                "Benzerlik: %.1f%% · Güvenilir eşleşme: %d".format(
+                "Benzerlik %.1f%% · %d güvenilir eşleşme · düşey hata %.2f px".format(
                     result.similarity,
-                    result.reliableMatches
-                )
-            )
-            Text(
-                "Hizalama güveni: %.1f%% · Medyan düşey hata: %.2f px".format(
-                    result.alignmentConfidence,
+                    result.reliableMatches,
                     result.medianVerticalError
-                )
+                ),
+                style = MaterialTheme.typography.bodySmall
             )
-            Text("Ortak geçerli alan: %.1f%%".format(result.commonAreaRatio * 100))
 
-            result.sbsPreview?.let { bitmap ->
-                Image(
-                    bitmap.asImageBitmap(),
-                    "Hizalanmış SBS önizleme",
-                    Modifier.fillMaxWidth().aspectRatio(2f),
-                    contentScale = ContentScale.Fit
+            if (result.leftPreview != null && result.rightPreview != null) {
+                Text("Kadraj")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (cropMode == CropMode.FIT) {
+                        Button(onClick = { cropMode = CropMode.FIT }) { Text("Fit") }
+                        OutlinedButton(onClick = { cropMode = CropMode.FILL }) { Text("Fill") }
+                    } else {
+                        OutlinedButton(onClick = { cropMode = CropMode.FIT }) { Text("Fit") }
+                        Button(onClick = { cropMode = CropMode.FILL }) { Text("Fill") }
+                    }
+                    OutlinedButton(onClick = { verticalBias = 0f }) { Text("Sıfırla") }
+                }
+
+                val imageScale = if (cropMode == CropMode.FIT) ContentScale.Fit else ContentScale.Crop
+                val imageAlignment = BiasAlignment(0f, verticalBias)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(2f)
+                        .pointerInput(cropMode) {
+                            detectVerticalDragGestures { _, dragAmount ->
+                                if (cropMode == CropMode.FILL) {
+                                    verticalBias = (verticalBias - dragAmount / 220f).coerceIn(-1f, 1f)
+                                }
+                            }
+                        }
+                ) {
+                    Image(
+                        bitmap = result.leftPreview.asImageBitmap(),
+                        contentDescription = "Sol göz",
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                        contentScale = imageScale,
+                        alignment = imageAlignment
+                    )
+                    Image(
+                        bitmap = result.rightPreview.asImageBitmap(),
+                        contentDescription = "Sağ göz",
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                        contentScale = imageScale,
+                        alignment = imageAlignment
+                    )
+                }
+
+                Text(
+                    if (cropMode == CropMode.FILL) {
+                        "Fotoğrafları birlikte yukarı/aşağı kaydırmak için önizleme üzerinde parmağınızı sürükleyin."
+                    } else {
+                        "Fit modunda mümkün olan ortak alan korunur; gereksiz üst/alt kırpma yapılmaz."
+                    },
+                    style = MaterialTheme.typography.bodySmall
                 )
 
                 val blinkBitmap = if (showRight) result.rightPreview else result.leftPreview
-                if (blinkBitmap != null) {
-                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                        Text("Blink: ${if (showRight) "sağ" else "sol"}")
-                        Switch(showRight, { showRight = it })
-                    }
-                    Image(
-                        blinkBitmap.asImageBitmap(),
-                        "Blink hizalama denetimi",
-                        Modifier.fillMaxWidth().height(180.dp),
-                        contentScale = ContentScale.Fit
-                    )
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text("Blink: ${if (showRight) "sağ" else "sol"}")
+                    Switch(showRight, { showRight = it })
                 }
+                Image(
+                    bitmap = blinkBitmap.asImageBitmap(),
+                    contentDescription = "Blink hizalama denetimi",
+                    modifier = Modifier.fillMaxWidth().height(180.dp),
+                    contentScale = ContentScale.Fit
+                )
             }
 
             if (result.saveable) {
-                Button(onClick = { onSave(result) }) {
+                Button(
+                    onClick = {
+                        onSave(result, RenderSettings(cropMode, verticalBias))
+                    },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     Text("Bu sonucu kaydet")
                 }
             }
