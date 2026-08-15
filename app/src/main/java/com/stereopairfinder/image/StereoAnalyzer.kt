@@ -34,13 +34,9 @@ class StereoAnalyzer {
         val fullTargetH = min(leftBitmap.height, rightBitmap.height)
         require(fullTargetW > 0 && fullTargetH > 0) { "Geçersiz fotoğraf boyutu" }
 
-        // Kaynak gözler hiçbir zaman birbirlerine uydurulmak için stretch edilmez.
-        // Boyut farkı varsa yalnızca merkezden ortak alan kırpılır.
         val fullLeft = bitmapToCommonMat(leftBitmap, fullTargetW, fullTargetH)
         val fullRight = bitmapToCommonMat(rightBitmap, fullTargetW, fullTargetH)
 
-        // ORB/RANSAC analizi için iki göze de aynı, uniform küçültme uygulanır.
-        // Bu yalnızca analiz kopyasıdır; final geometriyi değiştirmez.
         val analysisScale = min(1.0, ANALYSIS_MAX_SIDE.toDouble() / maxOf(fullTargetW, fullTargetH))
         val targetW = (fullTargetW * analysisScale).roundToInt().coerceAtLeast(1)
         val targetH = (fullTargetH * analysisScale).roundToInt().coerceAtLeast(1)
@@ -83,8 +79,6 @@ class StereoAnalyzer {
         src.fromList(good.map { pL[it.queryIdx].pt })
         dst.fromList(good.map { pR[it.trainIdx].pt })
 
-        // Fundamental matrix yalnızca yanlış feature eşleşmelerini ayıklamak için
-        // kullanılır. Görüntüye hiçbir projective/perspective dönüşüm uygulanmaz.
         val mask = Mat()
         val fundamental = if (good.size >= 12) {
             Calib3d.findFundamentalMat(src, dst, Calib3d.FM_RANSAC, 1.5, .995, mask)
@@ -98,24 +92,11 @@ class StereoAnalyzer {
         }
 
         val evidence = inlierMatches.size >= MIN_GEOMETRIC_INLIERS
-
-        // Stereo benzerliği artık toplam ORB keypoint sayısına bölünmüyor.
-        // Büyük paralaks gerçek bir stereo çiftte binlerce keypoint üretip eski
-        // metriği yapay biçimde düşürebiliyordu. Burada yalnızca descriptor
-        // testinden geçmiş iyi eşleşmelerin ne kadarının RANSAC geometrisine
-        // gerçekten uyduğunu ölçüyoruz.
         val similarity = if (!evidence || good.isEmpty()) {
             0.0
         } else {
             (100.0 * inlierMatches.size / good.size.toDouble()).coerceIn(0.0, 100.0)
         }
-
-        // Manuel seçilen çiftte kullanıcı zaten iki görüntünün birlikte
-        // değerlendirilmesini istemiştir. Zaman ve benzerlik eşikleri yalnızca
-        // otomatik galeri taramasında aday elemek için kullanılır. Geometrik
-        // evidence ve rigid hizalama kontrolleri manuel modda da aynen korunur.
-        val effectiveMaxSeconds = if (enforceSelectionFilters) maxSeconds else Int.MAX_VALUE
-        val effectiveThreshold = if (enforceSelectionFilters) threshold else 0
 
         var aligned = false
         var confidence = 0.0
@@ -213,14 +194,16 @@ class StereoAnalyzer {
                         sbsPreview = joinedPreview.bitmap()
 
                         val candidateStatus = PairPolicy.status(
-                            pair,
-                            similarity,
-                            evidence,
-                            aligned,
-                            confidence,
-                            area,
-                            effectiveMaxSeconds,
-                            effectiveThreshold
+                            pair = pair,
+                            similarity = similarity,
+                            evidence = evidence,
+                            aligned = aligned,
+                            confidence = confidence,
+                            area = area,
+                            maxSeconds = maxSeconds,
+                            threshold = threshold,
+                            enforceTime = enforceSelectionFilters,
+                            enforceSimilarity = enforceSelectionFilters
                         )
                         if (candidateStatus == PairStatus.MATCHED) {
                             sbsJpeg = buildFullResolutionJpeg(
@@ -251,14 +234,16 @@ class StereoAnalyzer {
         }
 
         val status = PairPolicy.status(
-            pair,
-            similarity,
-            evidence,
-            aligned,
-            confidence,
-            area,
-            effectiveMaxSeconds,
-            effectiveThreshold
+            pair = pair,
+            similarity = similarity,
+            evidence = evidence,
+            aligned = aligned,
+            confidence = confidence,
+            area = area,
+            maxSeconds = maxSeconds,
+            threshold = threshold,
+            enforceTime = enforceSelectionFilters,
+            enforceSimilarity = enforceSelectionFilters
         )
 
         listOf(fullLeft, fullRight, left, right, grayL, grayR, kpL, kpR, dL, dR, src, dst, mask, fundamental)
@@ -333,7 +318,6 @@ class StereoAnalyzer {
             cropL.copyTo(outL)
             cropR.copyTo(outR)
         } else {
-            // Aynı uniform ölçek iki göze de uygulanır; stereo geometrisi korunur.
             Imgproc.resize(cropL, outL, Size(finalSide.toDouble(), finalSide.toDouble()))
             Imgproc.resize(cropR, outR, Size(finalSide.toDouble(), finalSide.toDouble()))
         }
