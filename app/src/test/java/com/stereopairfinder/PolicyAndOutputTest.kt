@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import com.stereopairfinder.data.SbsSaver
 import com.stereopairfinder.image.CropSquare
 import com.stereopairfinder.image.Geometry
+import com.stereopairfinder.image.MatchSample
 import com.stereopairfinder.image.ParallaxSample
 import com.stereopairfinder.model.CameraFolderPolicy
 import org.junit.Assert.*
@@ -11,6 +12,8 @@ import org.junit.Test
 import org.mockito.Mockito.mock
 import java.time.Instant
 import java.util.UUID
+import kotlin.math.cos
+import kotlin.math.sin
 
 class PolicyAndOutputTest {
     @Test
@@ -47,7 +50,7 @@ class PolicyAndOutputTest {
     }
 
     @Test
-    fun `largest valid square avoids invalid perspective corners`() {
+    fun `largest valid square avoids invalid corners`() {
         val rows = listOf(
             "11100",
             "11100",
@@ -90,13 +93,105 @@ class PolicyAndOutputTest {
     }
 
     @Test
-    fun `median vertical residual and unsafe transform are handled`() {
+    fun `translation remains the default alignment`() {
+        val samples = buildList {
+            for (y in listOf(100.0, 400.0, 700.0, 1000.0)) {
+                for (x in listOf(150.0, 500.0, 900.0, 1400.0, 1800.0)) {
+                    add(
+                        MatchSample(
+                            leftX = x + 42.0,
+                            leftY = y - 7.0,
+                            rightX = x,
+                            rightY = y
+                        )
+                    )
+                }
+            }
+        }
+
+        val alignment = Geometry.estimateRigidAlignment(samples, 2000, 1200)
+        assertNotNull(alignment)
+        alignment!!
+        assertFalse(alignment.rotationApplied)
+        assertEquals(0.0, alignment.angleDegrees, 1e-9)
+        assertEquals(42.0, alignment.translateX, 1e-9)
+        assertEquals(-7.0, alignment.translateY, 1e-9)
+        assertEquals(0.0, alignment.medianVerticalError, 1e-9)
+    }
+
+    @Test
+    fun `tiny rotation is used only when it clearly improves vertical alignment`() {
+        val width = 2000
+        val height = 1200
+        val angle = 0.60
+        val radians = Math.toRadians(angle)
+        val c = cos(radians)
+        val s = sin(radians)
+        val cx = width / 2.0
+        val cy = height / 2.0
+        val tx = 28.0
+        val ty = -5.0
+
+        val samples = buildList {
+            for (y in listOf(120.0, 350.0, 650.0, 980.0)) {
+                for (x in listOf(120.0, 450.0, 850.0, 1250.0, 1700.0, 1900.0)) {
+                    val localX = x - cx
+                    val localY = y - cy
+                    val leftX = c * localX - s * localY + cx + tx
+                    val leftY = s * localX + c * localY + cy + ty
+                    add(MatchSample(leftX, leftY, x, y))
+                }
+            }
+        }
+
+        val alignment = Geometry.estimateRigidAlignment(samples, width, height)
+        assertNotNull(alignment)
+        alignment!!
+        assertTrue(alignment.rotationApplied)
+        assertEquals(angle, alignment.angleDegrees, 0.08)
+        assertEquals(tx, alignment.translateX, 0.8)
+        assertEquals(ty, alignment.translateY, 0.8)
+        assertTrue(alignment.medianVerticalError < alignment.translationOnlyVerticalError)
+        assertTrue(kotlin.math.abs(alignment.angleDegrees) <= Geometry.MAX_ROTATION_DEG)
+    }
+
+    @Test
+    fun `rotation beyond one degree is never applied`() {
+        val width = 2000
+        val height = 1200
+        val angle = 2.0
+        val radians = Math.toRadians(angle)
+        val c = cos(radians)
+        val s = sin(radians)
+        val cx = width / 2.0
+        val cy = height / 2.0
+
+        val samples = buildList {
+            for (y in listOf(100.0, 400.0, 800.0, 1050.0)) {
+                for (x in listOf(100.0, 500.0, 1000.0, 1500.0, 1900.0)) {
+                    val localX = x - cx
+                    val localY = y - cy
+                    add(
+                        MatchSample(
+                            leftX = c * localX - s * localY + cx,
+                            leftY = s * localX + c * localY + cy,
+                            rightX = x,
+                            rightY = y
+                        )
+                    )
+                }
+            }
+        }
+
+        val alignment = Geometry.estimateRigidAlignment(samples, width, height)
+        assertNotNull(alignment)
+        alignment!!
+        assertFalse(alignment.rotationApplied)
+        assertEquals(0.0, alignment.angleDegrees, 1e-9)
+    }
+
+    @Test
+    fun `median handles even sample counts`() {
         assertEquals(2.5, Geometry.median(listOf(1.0, 2.0, 3.0, 99.0)), 0.0)
-        assertFalse(Geometry.saneHomography(doubleArrayOf(1.0, 2.0)))
-        assertFalse(
-            Geometry.saneHomography(
-                doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, Double.NaN)
-            )
-        )
     }
 }
