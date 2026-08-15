@@ -520,8 +520,8 @@ class StereoAnalyzer {
         private const val EVIDENCE_SCORE_HALF_SATURATION = 40.0
         private const val SIMILARITY_RATIO_WEIGHT = 0.60
         private const val SIMILARITY_COUNT_WEIGHT = 0.40
-        private const val MAX_VERTICAL_ERROR_PX = 4.0
-        private const val VERTICAL_ERROR_CONFIDENCE_PENALTY = 10.0
+        private const val MAX_VERTICAL_ERROR_PX = 5.0
+        private const val VERTICAL_ERROR_CONFIDENCE_PENALTY = 8.0
         private const val SAFE_CROP_INSET_PX = 2
     }
 }
