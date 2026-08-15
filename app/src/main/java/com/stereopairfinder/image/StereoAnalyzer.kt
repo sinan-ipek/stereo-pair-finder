@@ -27,7 +27,8 @@ class StereoAnalyzer {
         leftBitmap: Bitmap,
         rightBitmap: Bitmap,
         maxSeconds: Int,
-        threshold: Int
+        threshold: Int,
+        enforceSelectionFilters: Boolean = true
     ): AnalysisResult {
         val fullTargetW = min(leftBitmap.width, rightBitmap.width)
         val fullTargetH = min(leftBitmap.height, rightBitmap.height)
@@ -96,13 +97,25 @@ class StereoAnalyzer {
             good.filterIndexed { index, _ -> mask.get(index, 0)[0] != 0.0 }
         }
 
-        val evidence = inlierMatches.size >= 18
-        val similarity = if (!evidence) {
+        val evidence = inlierMatches.size >= MIN_GEOMETRIC_INLIERS
+
+        // Stereo benzerliği artık toplam ORB keypoint sayısına bölünmüyor.
+        // Büyük paralaks gerçek bir stereo çiftte binlerce keypoint üretip eski
+        // metriği yapay biçimde düşürebiliyordu. Burada yalnızca descriptor
+        // testinden geçmiş iyi eşleşmelerin ne kadarının RANSAC geometrisine
+        // gerçekten uyduğunu ölçüyoruz.
+        val similarity = if (!evidence || good.isEmpty()) {
             0.0
         } else {
-            (100.0 * inlierMatches.size / min(pL.size, pR.size).coerceAtLeast(1) * 8.0)
-                .coerceAtMost(100.0)
+            (100.0 * inlierMatches.size / good.size.toDouble()).coerceIn(0.0, 100.0)
         }
+
+        // Manuel seçilen çiftte kullanıcı zaten iki görüntünün birlikte
+        // değerlendirilmesini istemiştir. Zaman ve benzerlik eşikleri yalnızca
+        // otomatik galeri taramasında aday elemek için kullanılır. Geometrik
+        // evidence ve rigid hizalama kontrolleri manuel modda da aynen korunur.
+        val effectiveMaxSeconds = if (enforceSelectionFilters) maxSeconds else Int.MAX_VALUE
+        val effectiveThreshold = if (enforceSelectionFilters) threshold else 0
 
         var aligned = false
         var confidence = 0.0
@@ -206,8 +219,8 @@ class StereoAnalyzer {
                             aligned,
                             confidence,
                             area,
-                            maxSeconds,
-                            threshold
+                            effectiveMaxSeconds,
+                            effectiveThreshold
                         )
                         if (candidateStatus == PairStatus.MATCHED) {
                             sbsJpeg = buildFullResolutionJpeg(
@@ -244,8 +257,8 @@ class StereoAnalyzer {
             aligned,
             confidence,
             area,
-            maxSeconds,
-            threshold
+            effectiveMaxSeconds,
+            effectiveThreshold
         )
 
         listOf(fullLeft, fullRight, left, right, grayL, grayR, kpL, kpR, dL, dR, src, dst, mask, fundamental)
@@ -298,9 +311,6 @@ class StereoAnalyzer {
         )
         matrix.release()
 
-        // Analiz maskesinde tamamen geçerli olan karenin tam çözünürlükteki
-        // karşılığını al. Birkaç analiz pikseli içeri girerek yuvarlama sınırını
-        // güvenli tarafta bırakıyoruz.
         val safeSquare = insetSquare(square, SAFE_CROP_INSET_PX)
         val scaledLeft = floor(safeSquare.left * scaleX).toInt().coerceIn(0, fullW - 1)
         val scaledTop = floor(safeSquare.top * scaleY).toInt().coerceIn(0, fullH - 1)
@@ -430,6 +440,7 @@ class StereoAnalyzer {
 
     companion object {
         private const val ANALYSIS_MAX_SIDE = 2048
+        private const val MIN_GEOMETRIC_INLIERS = 18
         private const val MAX_VERTICAL_ERROR_PX = 2.5
         private const val SAFE_CROP_INSET_PX = 2
     }
