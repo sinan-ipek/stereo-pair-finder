@@ -32,8 +32,24 @@ jobs:
           gradle -I /tmp/patch.init.gradle :app:writePatchClasspath --stacktrace
       - name: Compile SwapActivity
         run: |
-          mkdir -p /tmp/patch-classes /tmp/patch-dex
-          CP="$(cat /tmp/patch-classpath.txt):$ANDROID_HOME/platforms/android-35/android.jar"
+          mkdir -p /tmp/patch-classes /tmp/patch-dex /tmp/patch-aar-jars
+          RAW_CP="$(cat /tmp/patch-classpath.txt)"
+          CP="$ANDROID_HOME/platforms/android-35/android.jar"
+          IFS=':' read -ra PARTS <<< "$RAW_CP"
+          N=0
+          for P in "${PARTS[@]}"; do
+            if [[ "$P" == *.aar ]]; then
+              N=$((N+1))
+              mkdir -p "/tmp/aar-$N"
+              unzip -q -o "$P" classes.jar -d "/tmp/aar-$N" || true
+              if [[ -f "/tmp/aar-$N/classes.jar" ]]; then
+                cp "/tmp/aar-$N/classes.jar" "/tmp/patch-aar-jars/$N.jar"
+                CP="$CP:/tmp/patch-aar-jars/$N.jar"
+              fi
+            elif [[ "$P" == *.jar ]]; then
+              CP="$CP:$P"
+            fi
+          done
           javac -source 17 -target 17 -cp "$CP" -d /tmp/patch-classes patchsrc/com/stereopairfinder/SwapActivity.java
           jar cf /tmp/swap-patch.jar -C /tmp/patch-classes .
           D8="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name d8 | sort -V | tail -1)"
