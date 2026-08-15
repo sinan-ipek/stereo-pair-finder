@@ -36,6 +36,14 @@ data class RigidAlignment(
 )
 
 object Geometry {
+    const val MAX_ROTATION_DEG = 1.0
+    private const val MIN_ALIGNMENT_SAMPLES = 8
+    private const val MAX_ROTATION_SAMPLES = 80
+    private const val MIN_SLOPE_BASELINE_FRACTION = 0.08
+    private const val MIN_USEFUL_ROTATION_DEG = 0.05
+    private const val MIN_ROTATION_IMPROVEMENT_PX = 0.25
+    private const val MIN_ROTATION_IMPROVEMENT_FRACTION = 0.20
+
     /**
      * Finds the largest axis-aligned square whose every pixel is valid.
      *
@@ -290,15 +298,5 @@ object Geometry {
         } else {
             (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2
         }
-    }
-
-    companion object {
-        const val MAX_ROTATION_DEG = 1.0
-        private const val MIN_ALIGNMENT_SAMPLES = 8
-        private const val MAX_ROTATION_SAMPLES = 80
-        private const val MIN_SLOPE_BASELINE_FRACTION = 0.08
-        private const val MIN_USEFUL_ROTATION_DEG = 0.05
-        private const val MIN_ROTATION_IMPROVEMENT_PX = 0.25
-        private const val MIN_ROTATION_IMPROVEMENT_FRACTION = 0.20
     }
 }
