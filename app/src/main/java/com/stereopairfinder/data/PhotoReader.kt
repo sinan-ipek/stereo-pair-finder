@@ -26,8 +26,13 @@ class PhotoReader(private val resolver: ContentResolver) {
             MediaStore.MediaColumns.DISPLAY_NAME,
             MediaStore.MediaColumns.RELATIVE_PATH
         )
-        val selection = "(${MediaStore.MediaColumns.RELATIVE_PATH} IS NULL OR ${MediaStore.MediaColumns.RELATIVE_PATH} != ?)"
-        val selectionArgs = arrayOf(SbsSaver.OUTPUT_PATH)
+        val selection =
+            "(${MediaStore.MediaColumns.RELATIVE_PATH} IS NULL OR " +
+                "(${MediaStore.MediaColumns.RELATIVE_PATH} != ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} != ?))"
+        val selectionArgs = arrayOf(
+            SbsSaver.OUTPUT_PATH,
+            SbsSaver.LEGACY_OUTPUT_PATH
+        )
         val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} ASC, ${MediaStore.Images.Media._ID} ASC"
 
         resolver.query(
