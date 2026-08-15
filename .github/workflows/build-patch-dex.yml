@@ -53,7 +53,14 @@ jobs:
           javac -source 17 -target 17 -cp "$CP" -d /tmp/patch-classes patchsrc/com/stereopairfinder/SwapActivity.java
           jar cf /tmp/swap-patch.jar -C /tmp/patch-classes .
           D8="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name d8 | sort -V | tail -1)"
-          "$D8" --min-api 29 --lib "$ANDROID_HOME/platforms/android-35/android.jar" --classpath "$CP" --output /tmp/patch-dex /tmp/swap-patch.jar
+          D8_CP=()
+          IFS=':' read -ra CP_PARTS <<< "$CP"
+          for J in "${CP_PARTS[@]}"; do
+            if [[ "$J" != "$ANDROID_HOME/platforms/android-35/android.jar" ]]; then
+              D8_CP+=(--classpath "$J")
+            fi
+          done
+          "$D8" --min-api 29 --lib "$ANDROID_HOME/platforms/android-35/android.jar" "${D8_CP[@]}" --output /tmp/patch-dex /tmp/swap-patch.jar
           cp /tmp/patch-dex/classes.dex swap-patch.dex
       - name: Package signing tools
         run: |
