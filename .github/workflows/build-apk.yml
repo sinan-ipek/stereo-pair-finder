@@ -10,7 +10,7 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -21,99 +21,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
-
-      - name: Apply balanced Fit and stronger swap control
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-
-          main = Path("app/src/main/java/com/stereopairfinder/MainActivity.kt")
-          text = main.read_text()
-
-          simple_replacements = [
-              (
-                  'CropMode.FIT -> "Fit: ortak alanı mümkün olduğunca korur."',
-                  'CropMode.FIT -> "Fit: ortak alanı korur; siyah boşluk gerekiyorsa üst-alt eşit dağıtılır."'
-              ),
-              (
-                  'ChoiceButton("Yukarı", verticalBias == -0.5f) { verticalBias = -0.5f }\n                    ChoiceButton("Ortala", verticalBias == 0f) { verticalBias = 0f }\n                    ChoiceButton("Aşağı", verticalBias == 0.5f) { verticalBias = 0.5f }',
-                  'ChoiceButton("Yukarı", verticalBias == -0.5f, enabled = cropMode != CropMode.FIT) { verticalBias = -0.5f }\n                    ChoiceButton("Ortala", verticalBias == 0f, enabled = cropMode != CropMode.FIT) { verticalBias = 0f }\n                    ChoiceButton("Aşağı", verticalBias == 0.5f, enabled = cropMode != CropMode.FIT) { verticalBias = 0.5f }'
-              ),
-              (
-                  'detectVerticalDragGestures { _, dragAmount ->\n                                    verticalBias = (verticalBias - dragAmount / 220f).coerceIn(-1f, 1f)\n                                }',
-                  'detectVerticalDragGestures { _, dragAmount ->\n                                    if (cropMode != CropMode.FIT) {\n                                        verticalBias = (verticalBias - dragAmount / 220f).coerceIn(-1f, 1f)\n                                    }\n                                }'
-              ),
-              (
-                  'CropMode.FIT -> "Fit: mümkün olan ortak alanı korur. Parmağınızla iki gözü birlikte yukarı/aşağı taşıyabilirsiniz."',
-                  'CropMode.FIT -> "Fit: mümkün olan ortak alanı korur; siyah boşluk gerekiyorsa görüntü üst-alt tam ortalanır."'
-              )
-          ]
-
-          for old, new in simple_replacements:
-              if old not in text:
-                  raise SystemExit(f"MainActivity replacement not found:\n{old}")
-              text = text.replace(old, new, 1)
-
-          swap_pattern = re.compile(
-              r'''\n\s*if \(swapEyes\) \{\s*\n\s*Button\(\s*\n\s*onClick = \{ swapEyes = false \},.*?\n\s*\} else \{\s*\n\s*OutlinedButton\(\s*\n\s*onClick = \{ swapEyes = true \},.*?\n\s*\}\s*\n\s*\}''',
-              re.DOTALL
-          )
-          swap_replacement = '''
-
-                    FloatingActionButton(
-                        onClick = { swapEyes = !swapEyes },
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .size(64.dp),
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    ) {
-                        Text("⇄", style = MaterialTheme.typography.headlineSmall)
-                    }'''
-          text, count = swap_pattern.subn(swap_replacement, text, count=1)
-          if count != 1:
-              raise SystemExit(f"Swap control replacement count: {count}")
-
-          fit_preview_pattern = re.compile(
-              r'(CropMode\.FIT -> \{\s*Image\(.*?contentScale = ContentScale\.Fit,\s*)alignment = alignment',
-              re.DOTALL
-          )
-          text, count = fit_preview_pattern.subn(r'\1alignment = Alignment.Center', text, count=1)
-          if count != 1:
-              raise SystemExit(f"Fit preview alignment replacement count: {count}")
-
-          main.write_text(text)
-
-          analyzer = Path("app/src/main/java/com/stereopairfinder/image/StereoAnalyzer.kt")
-          text = analyzer.read_text()
-          old = "CropMode.FIT -> fitInsideSquare(source, side, bias)"
-          new = "CropMode.FIT -> fitInsideSquare(source, side, 0f)"
-          if old not in text:
-              raise SystemExit("StereoAnalyzer Fit replacement not found")
-          analyzer.write_text(text.replace(old, new, 1))
-
-          gradle = Path("app/build.gradle.kts")
-          text = gradle.read_text()
-          if 'versionCode = 10' not in text or 'versionName = "1.8-centered-swap"' not in text:
-              raise SystemExit("Expected 1.8 version markers not found")
-          text = text.replace('versionCode = 10', 'versionCode = 11', 1)
-          text = text.replace('versionName = "1.8-centered-swap"', 'versionName = "1.9-balanced-fit-swap"', 1)
-          gradle.write_text(text)
-          PY
-
-      - name: Persist UI and Fit corrections
-        if: github.event_name == 'pull_request'
-        run: |
-          if ! git diff --quiet; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add app/src/main/java/com/stereopairfinder/MainActivity.kt app/src/main/java/com/stereopairfinder/image/StereoAnalyzer.kt app/build.gradle.kts
-            git commit -m "Center Fit padding and emphasize eye swap"
-            git push origin HEAD:${{ github.event.pull_request.head.ref }}
-          fi
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
