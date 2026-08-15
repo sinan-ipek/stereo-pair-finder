@@ -19,7 +19,8 @@ enum class ScanStartMode(val label: String) {
 
 data class RenderSettings(
     val cropMode: CropMode = CropMode.FIT,
-    val verticalBias: Float = 0f
+    val verticalBias: Float = 0f,
+    val swapEyes: Boolean = false
 ) {
     fun normalized() = copy(verticalBias = verticalBias.coerceIn(-1f, 1f))
 }
