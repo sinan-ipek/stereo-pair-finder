@@ -19,7 +19,7 @@ data class UiState(
     val maxSeconds: Int = DEFAULT_MAX_SECONDS,
     val similarity: Int = DEFAULT_SIMILARITY,
     val busy: Boolean = false,
-    val stage: String = "Tüm telefonu taramaya hazır",
+    val stage: String = "Hazır",
     val message: String? = null,
     val progress: Float = 0f,
     val photoCount: Int = 0,
@@ -37,12 +37,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val state = _state.asStateFlow()
     private var work: Job? = null
 
-    fun maxSeconds(v: Int) {
-        _state.value = _state.value.copy(maxSeconds = v)
-    }
-
-    fun similarity(v: Int) {
-        _state.value = _state.value.copy(similarity = v)
+    fun clearMessage() {
+        if (_state.value.message != null) _state.value = _state.value.copy(message = null)
     }
 
     fun permissionDenied() {
@@ -51,13 +47,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    fun scanAll() {
+    fun scanAll(settings: ScanSettings) {
         work?.cancel()
         work = viewModelScope.launch(Dispatchers.Default) {
-            val snapshot = _state.value
-            _state.value = snapshot.copy(
+            val normalized = settings.copy(render = settings.render.normalized())
+            _state.value = _state.value.copy(
                 selected = emptyList(),
                 results = emptyList(),
+                maxSeconds = normalized.maxSeconds,
+                similarity = normalized.similarity,
                 busy = true,
                 stage = "Telefonun fotoğraf arşivi okunuyor…",
                 message = null,
@@ -73,10 +71,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val photos = withContext(Dispatchers.IO) { reader.allPhotos() }
                 ensureActive()
 
-                val allAdjacent = PairPolicy.adjacent(photos)
-                val candidates = allAdjacent.filter { pair ->
+                val candidates = PairPolicy.adjacent(photos).filter { pair ->
                     val seconds = pair.seconds
-                    seconds != null && seconds <= snapshot.maxSeconds
+                    seconds != null && seconds <= normalized.maxSeconds
                 }
 
                 _state.value = _state.value.copy(
@@ -117,9 +114,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             pair = pair,
                             leftBitmap = left,
                             rightBitmap = right,
-                            maxSeconds = snapshot.maxSeconds,
-                            threshold = snapshot.similarity,
-                            enforceSelectionFilters = true
+                            maxSeconds = normalized.maxSeconds,
+                            threshold = normalized.similarity,
+                            enforceSelectionFilters = true,
+                            renderSettings = normalized.render,
+                            produceJpeg = true
                         )
 
                         if (result.status == PairStatus.MATCHED) {
@@ -164,10 +163,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     stage = "Tam tarama tamamlandı: $matched stereo çift bulundu, $saved SBS kaydedildi"
                 )
             } catch (_: CancellationException) {
-                _state.value = _state.value.copy(
-                    busy = false,
-                    stage = "Tarama iptal edildi"
-                )
+                _state.value = _state.value.copy(busy = false, stage = "Tarama iptal edildi")
             } catch (t: Throwable) {
                 _state.value = _state.value.copy(
                     busy = false,
@@ -181,18 +177,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun select(uris: List<Uri>) {
         work?.cancel()
         viewModelScope.launch(Dispatchers.IO) {
-            val photos = uris.mapNotNull { uri ->
-                runCatching { reader.metadata(uri) }.getOrNull()
-            }
+            val photos = uris.mapNotNull { uri -> runCatching { reader.metadata(uri) }.getOrNull() }
+            recycleResults(_state.value.results)
             _state.value = _state.value.copy(
                 selected = photos,
                 results = emptyList(),
                 message = if (photos.size < 2) "İki fotoğraf seçin." else null,
-                stage = if (photos.size == 2) {
-                    "2 fotoğraf seçildi · manuel çiftte zaman ve benzerlik eşiği uygulanmaz"
-                } else {
-                    "${photos.size} fotoğraf seçildi"
-                }
+                stage = if (photos.size == 2) "2 fotoğraf seçildi" else "${photos.size} fotoğraf seçildi"
             )
         }
     }
@@ -205,10 +196,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         work?.cancel()
         work = viewModelScope.launch(Dispatchers.Default) {
             val snapshot = _state.value
-            // Manuel seçimde kullanıcının seçtiği sıra korunur ve zaman filtresi
-            // uygulanmaz. Kullanıcı bu iki fotoğrafın birlikte denenmesini istemiştir.
             val pair = PairCandidate(1, snapshot.selected[0], snapshot.selected[1])
             val analyzer = StereoAnalyzer()
+            recycleResults(snapshot.results)
             _state.value = snapshot.copy(
                 busy = true,
                 results = emptyList(),
@@ -216,21 +206,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 stage = "Seçilen stereo çift hizalanıyor",
                 progress = 0f
             )
+
             try {
-                val l = reader.bitmap(pair.left.uri, FINAL_SOURCE_MAX_SIDE)
-                val r = reader.bitmap(pair.right.uri, FINAL_SOURCE_MAX_SIDE)
+                val left = reader.bitmap(pair.left.uri, FINAL_SOURCE_MAX_SIDE)
+                val right = reader.bitmap(pair.right.uri, FINAL_SOURCE_MAX_SIDE)
                 val result = try {
                     analyzer.analyze(
                         pair = pair,
-                        leftBitmap = l,
-                        rightBitmap = r,
+                        leftBitmap = left,
+                        rightBitmap = right,
                         maxSeconds = snapshot.maxSeconds,
                         threshold = snapshot.similarity,
-                        enforceSelectionFilters = false
+                        enforceSelectionFilters = false,
+                        renderSettings = RenderSettings(CropMode.FIT, 0f),
+                        produceJpeg = false
                     )
                 } finally {
-                    if (!l.isRecycled) l.recycle()
-                    if (!r.isRecycled) r.recycle()
+                    if (!left.isRecycled) left.recycle()
+                    if (!right.isRecycled) right.recycle()
                 }
 
                 _state.value = _state.value.copy(
@@ -238,7 +231,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     results = listOf(result),
                     progress = 1f,
                     stage = if (result.saveable) {
-                        "Manuel çift hizalandı · sonucu kontrol edip kaydedebilirsiniz"
+                        "Manuel çift hizalandı · Fit/Fill ve dikey kadrajı ayarlayabilirsiniz"
                     } else {
                         "Manuel çift güvenilir biçimde hizalanamadı: ${result.status.text}"
                     }
@@ -255,24 +248,60 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun save(result: AnalysisResult, settings: RenderSettings) {
+        if (result.status != PairStatus.MATCHED || _state.value.busy) return
+        work?.cancel()
+        work = viewModelScope.launch(Dispatchers.Default) {
+            _state.value = _state.value.copy(
+                busy = true,
+                message = null,
+                stage = "Seçtiğiniz kadraj yüksek çözünürlükte hazırlanıyor…"
+            )
+
+            var left: Bitmap? = null
+            var right: Bitmap? = null
+            var rendered: AnalysisResult? = null
+            try {
+                left = reader.bitmap(result.pair.left.uri, FINAL_SOURCE_MAX_SIDE)
+                right = reader.bitmap(result.pair.right.uri, FINAL_SOURCE_MAX_SIDE)
+                rendered = StereoAnalyzer().analyze(
+                    pair = result.pair,
+                    leftBitmap = left,
+                    rightBitmap = right,
+                    maxSeconds = _state.value.maxSeconds,
+                    threshold = _state.value.similarity,
+                    enforceSelectionFilters = false,
+                    renderSettings = settings.normalized(),
+                    produceJpeg = true
+                )
+                val jpeg = rendered.sbsJpeg ?: error("Kaydedilebilir SBS üretilemedi")
+                withContext(Dispatchers.IO) { saver.saveJpeg(jpeg) }
+                _state.value = _state.value.copy(
+                    busy = false,
+                    stage = "Hazır",
+                    message = "Fotoğraf Stereo SBS Test albümüne kaydedildi."
+                )
+            } catch (_: CancellationException) {
+                _state.value = _state.value.copy(busy = false, stage = "Kayıt iptal edildi")
+            } catch (t: Throwable) {
+                _state.value = _state.value.copy(
+                    busy = false,
+                    stage = "Kayıt başarısız",
+                    message = "Kayıt başarısız: ${t.message ?: "Bilinmeyen hata"}"
+                )
+            } finally {
+                recycleResult(rendered)
+                left?.let { if (!it.isRecycled) it.recycle() }
+                right?.let { if (!it.isRecycled) it.recycle() }
+            }
+        }
+    }
+
     fun cancel() {
         work?.cancel()
     }
 
-    fun save(result: AnalysisResult) {
-        val jpeg = result.sbsJpeg ?: return
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { saver.saveJpeg(jpeg) }
-                .onSuccess {
-                    _state.value = _state.value.copy(
-                        message = "${it.name}, ${it.location} konumuna kaydedildi"
-                    )
-                }
-                .onFailure {
-                    _state.value = _state.value.copy(message = "Kayıt başarısız: ${it.message}")
-                }
-        }
-    }
+    private fun recycleResults(results: List<AnalysisResult>) = results.forEach(::recycleResult)
 
     private fun recycleResult(result: AnalysisResult?) {
         if (result == null) return
