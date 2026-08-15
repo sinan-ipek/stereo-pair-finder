@@ -1,6 +1,7 @@
 package com.stereopairfinder
 
 import android.content.ContentResolver
+import android.net.Uri
 import com.stereopairfinder.data.SbsSaver
 import com.stereopairfinder.image.CropRect
 import com.stereopairfinder.image.CropSquare
@@ -8,6 +9,9 @@ import com.stereopairfinder.image.Geometry
 import com.stereopairfinder.image.MatchSample
 import com.stereopairfinder.image.ParallaxSample
 import com.stereopairfinder.model.CameraFolderPolicy
+import com.stereopairfinder.model.PairPolicy
+import com.stereopairfinder.model.Photo
+import com.stereopairfinder.model.ScanCheckpoint
 import org.junit.Assert.*
 import org.junit.Test
 import org.mockito.Mockito.mock
@@ -39,6 +43,56 @@ class PolicyAndOutputTest {
         assertEquals(3072, Geometry.fullOutputSide(5000))
         assertEquals(3024, Geometry.fullOutputSide(3024))
         assertEquals(2.0, (Geometry.fullOutputSide(3024) * 2).toDouble() / Geometry.fullOutputSide(3024), 0.0)
+    }
+
+    @Test
+    fun `resume keeps checkpoint photo so boundary pair is not lost`() {
+        val photos = listOf(
+            photo(taken = 1_000, id = 10),
+            photo(taken = 2_000, id = 20),
+            photo(taken = 3_000, id = 30)
+        )
+
+        val resumed = PairPolicy.fromCheckpoint(
+            photos,
+            ScanCheckpoint(takenAtMillis = 2_000, mediaStoreId = 20)
+        )
+
+        assertEquals(listOf(20L, 30L), resumed.map { it.mediaStoreId })
+        val pair = PairPolicy.adjacent(resumed).single()
+        assertEquals(20L, pair.left.mediaStoreId)
+        assertEquals(30L, pair.right.mediaStoreId)
+    }
+
+    @Test
+    fun `resume uses predecessor when checkpoint photo was deleted`() {
+        val photos = listOf(
+            photo(taken = 1_000, id = 10),
+            photo(taken = 3_000, id = 30),
+            photo(taken = 4_000, id = 40)
+        )
+
+        val resumed = PairPolicy.fromCheckpoint(
+            photos,
+            ScanCheckpoint(takenAtMillis = 2_000, mediaStoreId = 20)
+        )
+
+        assertEquals(listOf(10L, 30L, 40L), resumed.map { it.mediaStoreId })
+    }
+
+    @Test
+    fun `checkpoint is created only for stable media store photo`() {
+        val good = photo(taken = 5_000, id = 50)
+        assertEquals(ScanCheckpoint(5_000, 50), PairPolicy.checkpointOf(good))
+
+        val missingId = Photo(
+            uri = mock(Uri::class.java),
+            takenAtMillis = 5_000,
+            label = "missing",
+            tie = "missing",
+            mediaStoreId = null
+        )
+        assertNull(PairPolicy.checkpointOf(missingId))
     }
 
     @Test
@@ -182,4 +236,12 @@ class PolicyAndOutputTest {
     fun `median handles even sample counts`() {
         assertEquals(2.5, Geometry.median(listOf(1.0, 2.0, 3.0, 99.0)), 0.0)
     }
+
+    private fun photo(taken: Long, id: Long): Photo = Photo(
+        uri = mock(Uri::class.java),
+        takenAtMillis = taken,
+        label = "photo-$id",
+        tie = "photo-$id",
+        mediaStoreId = id
+    )
 }
