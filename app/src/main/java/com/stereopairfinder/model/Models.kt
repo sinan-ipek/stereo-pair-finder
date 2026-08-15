@@ -6,6 +6,24 @@ import android.net.Uri
 const val DEFAULT_MAX_SECONDS = 15
 const val DEFAULT_SIMILARITY = 72
 
+enum class CropMode(val label: String) {
+    FIT("Fit"),
+    FILL("Fill")
+}
+
+data class RenderSettings(
+    val cropMode: CropMode = CropMode.FIT,
+    val verticalBias: Float = 0f
+) {
+    fun normalized() = copy(verticalBias = verticalBias.coerceIn(-1f, 1f))
+}
+
+data class ScanSettings(
+    val render: RenderSettings = RenderSettings(),
+    val maxSeconds: Int = DEFAULT_MAX_SECONDS,
+    val similarity: Int = DEFAULT_SIMILARITY
+)
+
 data class Photo(
     val uri: Uri,
     val takenAtMillis: Long?,
@@ -47,7 +65,7 @@ data class AnalysisResult(
     val sbsPreview: Bitmap?,
     val sbsJpeg: ByteArray? = null
 ) {
-    val saveable get() = status == PairStatus.MATCHED && sbsJpeg != null
+    val saveable get() = status == PairStatus.MATCHED
 }
 
 object PairPolicy {
