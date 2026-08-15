@@ -8,7 +8,13 @@ const val DEFAULT_SIMILARITY = 72
 
 enum class CropMode(val label: String) {
     FIT("Fit"),
+    FOUR_THREE("4:3"),
     FILL("Fill")
+}
+
+enum class ScanStartMode(val label: String) {
+    FROM_START("Baştan"),
+    RESUME("Devam")
 }
 
 data class RenderSettings(
@@ -21,14 +27,21 @@ data class RenderSettings(
 data class ScanSettings(
     val render: RenderSettings = RenderSettings(),
     val maxSeconds: Int = DEFAULT_MAX_SECONDS,
-    val similarity: Int = DEFAULT_SIMILARITY
+    val similarity: Int = DEFAULT_SIMILARITY,
+    val startMode: ScanStartMode = ScanStartMode.FROM_START
+)
+
+data class ScanCheckpoint(
+    val takenAtMillis: Long,
+    val mediaStoreId: Long
 )
 
 data class Photo(
     val uri: Uri,
     val takenAtMillis: Long?,
     val label: String,
-    val tie: String = uri.toString()
+    val tie: String = uri.toString(),
+    val mediaStoreId: Long? = uri.lastPathSegment?.toLongOrNull()
 )
 
 data class PairCandidate(
@@ -69,15 +82,58 @@ data class AnalysisResult(
 }
 
 object PairPolicy {
-    fun sorted(photos: List<Photo>) = photos.sortedWith(
+    private val photoComparator =
         compareBy<Photo> { it.takenAtMillis == null }
             .thenBy { it.takenAtMillis ?: Long.MAX_VALUE }
+            .thenBy { it.mediaStoreId ?: Long.MAX_VALUE }
             .thenBy { it.tie }
-    )
+
+    fun sorted(photos: List<Photo>) = photos.sortedWith(photoComparator)
 
     fun adjacent(photos: List<Photo>) = sorted(photos)
         .zipWithNext()
         .mapIndexed { i, (a, b) -> PairCandidate(i + 1, a, b) }
+
+    /**
+     * Resume taramasında checkpoint fotoğrafını da listenin başında bırakır.
+     * Böylece ilk yeni fotoğrafla oluşturacağı sınır çifti kaçırılmaz.
+     *
+     * Checkpoint fotoğrafı silinmişse checkpoint'ten sonraki ilk fotoğrafın
+     * bir önceki komşusu da dahil edilir. Bu en kötü ihtimalle tek bir çifti
+     * yeniden inceler; hiçbir yeni çifti atlamaz.
+     */
+    fun fromCheckpoint(
+        photos: List<Photo>,
+        checkpoint: ScanCheckpoint?
+    ): List<Photo> {
+        val ordered = sorted(photos)
+        if (checkpoint == null || ordered.isEmpty()) return ordered
+
+        val exactIndex = ordered.indexOfFirst { photo ->
+            photo.mediaStoreId == checkpoint.mediaStoreId &&
+                photo.takenAtMillis == checkpoint.takenAtMillis
+        }
+        if (exactIndex >= 0) return ordered.drop(exactIndex)
+
+        val firstAfter = ordered.indexOfFirst { photo -> isAfter(photo, checkpoint) }
+        if (firstAfter < 0) return emptyList()
+        return ordered.drop((firstAfter - 1).coerceAtLeast(0))
+    }
+
+    fun checkpointOf(photo: Photo): ScanCheckpoint? {
+        val takenAt = photo.takenAtMillis ?: return null
+        val id = photo.mediaStoreId ?: return null
+        return ScanCheckpoint(takenAt, id)
+    }
+
+    private fun isAfter(photo: Photo, checkpoint: ScanCheckpoint): Boolean {
+        val takenAt = photo.takenAtMillis ?: Long.MAX_VALUE
+        return when {
+            takenAt > checkpoint.takenAtMillis -> true
+            takenAt < checkpoint.takenAtMillis -> false
+            else -> (photo.mediaStoreId ?: Long.MAX_VALUE) > checkpoint.mediaStoreId
+        }
+    }
 
     fun status(
         pair: PairCandidate,
