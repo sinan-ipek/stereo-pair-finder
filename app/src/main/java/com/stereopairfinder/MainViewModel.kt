@@ -309,7 +309,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     results = listOf(result),
                     progress = 1f,
                     stage = if (result.saveable) {
-                        "Manuel çift hizalandı · Fit / 4:3 / Fill ve dikey kadrajı ayarlayabilirsiniz"
+                        "Manuel çift hizalandı · kadrajı ve sağ/sol sırasını ayarlayabilirsiniz"
                     } else {
                         "Manuel çift güvenilir biçimde hizalanamadı: ${result.status.text}"
                     }
@@ -357,7 +357,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.value = _state.value.copy(
                     busy = false,
                     stage = "Hazır",
-                    message = "Fotoğraf Stereo SBS Test albümüne kaydedildi."
+                    message = "Fotoğraf Stereo SBS albümüne kaydedildi."
                 )
             } catch (_: CancellationException) {
                 _state.value = _state.value.copy(busy = false, stage = "Kayıt iptal edildi")
