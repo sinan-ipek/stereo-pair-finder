@@ -368,37 +368,61 @@ private fun ResultCard(
                     ChoiceButton("Fit", cropMode == CropMode.FIT) { cropMode = CropMode.FIT }
                     ChoiceButton("4:3", cropMode == CropMode.FOUR_THREE) { cropMode = CropMode.FOUR_THREE }
                     ChoiceButton("Fill", cropMode == CropMode.FILL) { cropMode = CropMode.FILL }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ChoiceButton("⇄", swapEyes) { swapEyes = !swapEyes }
                     OutlinedButton(onClick = { verticalBias = 0f }) { Text("Sıfırla") }
                 }
 
                 val displayedLeftPreview = if (swapEyes) result.rightPreview else result.leftPreview
                 val displayedRightPreview = if (swapEyes) result.leftPreview else result.rightPreview
 
-                Row(
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .aspectRatio(2f)
-                        .pointerInput(cropMode) {
-                            detectVerticalDragGestures { _, dragAmount ->
-                                verticalBias = (verticalBias - dragAmount / 220f).coerceIn(-1f, 1f)
-                            }
-                        }
                 ) {
-                    EyePreview(
-                        bitmap = displayedLeftPreview,
-                        cropMode = cropMode,
-                        verticalBias = verticalBias,
-                        modifier = Modifier.weight(1f).fillMaxHeight()
-                    )
-                    EyePreview(
-                        bitmap = displayedRightPreview,
-                        cropMode = cropMode,
-                        verticalBias = verticalBias,
-                        modifier = Modifier.weight(1f).fillMaxHeight()
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(cropMode) {
+                                detectVerticalDragGestures { _, dragAmount ->
+                                    verticalBias = (verticalBias - dragAmount / 220f).coerceIn(-1f, 1f)
+                                }
+                            }
+                    ) {
+                        EyePreview(
+                            bitmap = displayedLeftPreview,
+                            cropMode = cropMode,
+                            verticalBias = verticalBias,
+                            modifier = Modifier.weight(1f).fillMaxHeight()
+                        )
+                        EyePreview(
+                            bitmap = displayedRightPreview,
+                            cropMode = cropMode,
+                            verticalBias = verticalBias,
+                            modifier = Modifier.weight(1f).fillMaxHeight()
+                        )
+                    }
+
+                    if (swapEyes) {
+                        Button(
+                            onClick = { swapEyes = false },
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .size(48.dp),
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text("⇄")
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = { swapEyes = true },
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .size(48.dp),
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text("⇄")
+                        }
+                    }
                 }
 
                 Text(
