@@ -1,0 +1,26 @@
+name: Package portable signing tools
+
+on:
+  push:
+    branches:
+      - agent/current-apk-recovery
+
+jobs:
+  tools:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Package tools and runtime
+        run: |
+          BT="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          mkdir -p tools/lib
+          cp "$BT/apksigner" tools/
+          cp "$BT/zipalign" tools/
+          cp "$BT/lib/apksigner.jar" tools/lib/
+          CPP="$(find "$ANDROID_HOME" -type f -name 'libc++.so' | head -1)"
+          test -n "$CPP"
+          cp "$CPP" tools/libc++.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-signing-tools
+          path: tools/
+          if-no-files-found: error
