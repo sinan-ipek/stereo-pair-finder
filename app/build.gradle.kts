@@ -12,8 +12,8 @@ android {
         applicationId = "com.stereopairfinder"
         minSdk = 29
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2-full-scan"
+        versionCode = 4
+        versionName = "1.3-rigid-alignment"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
