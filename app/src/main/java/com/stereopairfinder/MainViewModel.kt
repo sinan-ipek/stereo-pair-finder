@@ -39,7 +39,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var work: Job? = null
 
     init {
-        _state.value = _state.value.copy(resumeAvailable = loadCheckpoint() != null)
+        // 1.6 checkpoint'i varsa doğrudan devam edilir. 1.5 yalnızca tam tarama
+        // zamanını tutuyordu; o kayıt varsa ilk ▶ Devam sırasında son MediaStore
+        // fotoğrafından yeni checkpoint üretilebilir.
+        _state.value = _state.value.copy(
+            resumeAvailable = loadCheckpoint() != null || prefs.contains(KEY_LAST_FULL_SCAN)
+        )
     }
 
     fun clearMessage() {
@@ -65,6 +70,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 null
             }
+            val migrateLegacyCompletedScan =
+                normalized.startMode == ScanStartMode.RESUME &&
+                    requestedCheckpoint == null &&
+                    prefs.contains(KEY_LAST_FULL_SCAN)
 
             _state.value = _state.value.copy(
                 selected = emptyList(),
@@ -89,11 +98,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val photos = withContext(Dispatchers.IO) { reader.allPhotos() }
                 ensureActive()
+                val orderedPhotos = PairPolicy.sorted(photos)
 
-                val scanPhotos = if (normalized.startMode == ScanStartMode.RESUME && requestedCheckpoint != null) {
-                    PairPolicy.fromCheckpoint(photos, requestedCheckpoint)
+                // 1.5'ten yükseltme: 1.5'in KEY_LAST_FULL_SCAN kaydı yalnızca
+                // tam tarama bitince yazılıyordu. Dolayısıyla son stabil fotoğrafı
+                // güvenle tamamlanmış galerinin sınırı kabul edebiliriz.
+                val effectiveCheckpoint = when {
+                    requestedCheckpoint != null -> requestedCheckpoint
+                    migrateLegacyCompletedScan -> {
+                        val lastStablePhoto = orderedPhotos.lastOrNull {
+                            PairPolicy.checkpointOf(it) != null
+                        }
+                        lastStablePhoto?.let(::saveCheckpoint)
+                        lastStablePhoto?.let(PairPolicy::checkpointOf)
+                    }
+                    else -> null
+                }
+
+                val scanPhotos = if (
+                    normalized.startMode == ScanStartMode.RESUME &&
+                    effectiveCheckpoint != null
+                ) {
+                    PairPolicy.fromCheckpoint(orderedPhotos, effectiveCheckpoint)
                 } else {
-                    PairPolicy.sorted(photos)
+                    orderedPhotos
                 }
 
                 val candidates = PairPolicy.adjacent(scanPhotos).filter { pair ->
@@ -101,7 +129,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     seconds != null && seconds <= normalized.maxSeconds
                 }
 
-                val modeText = if (normalized.startMode == ScanStartMode.RESUME && requestedCheckpoint != null) {
+                val modeText = if (
+                    normalized.startMode == ScanStartMode.RESUME &&
+                    effectiveCheckpoint != null
+                ) {
                     "Devam"
                 } else {
                     "Baştan"
@@ -119,7 +150,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.value = _state.value.copy(
                         busy = false,
                         progress = 1f,
-                        stage = if (normalized.startMode == ScanStartMode.RESUME && requestedCheckpoint != null) {
+                        stage = if (modeText == "Devam") {
                             "Kaldığınız yerden sonra incelenecek yeni stereo adayı yok"
                         } else {
                             "Tam tarama tamamlandı: uygun zaman aralığında çift bulunamadı"
@@ -371,6 +402,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit()
             .remove(KEY_CHECKPOINT_TAKEN)
             .remove(KEY_CHECKPOINT_ID)
+            .remove(KEY_LAST_FULL_SCAN)
             .apply()
         _state.value = _state.value.copy(resumeAvailable = false)
     }
