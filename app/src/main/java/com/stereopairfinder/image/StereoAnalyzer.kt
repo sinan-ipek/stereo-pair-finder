@@ -83,7 +83,8 @@ class StereoAnalyzer {
         src.fromList(good.map { pL[it.queryIdx].pt })
         dst.fromList(good.map { pR[it.trainIdx].pt })
 
-        // Fundamental matrix is only an outlier filter. It is never used to warp the image.
+        // Fundamental matrix yalnızca feature outlier ayıklamak için kullanılır.
+        // Görüntüye perspective/homography dönüşümü hiçbir zaman uygulanmaz.
         val mask = Mat()
         val fundamental = if (good.size >= 12) {
             Calib3d.findFundamentalMat(src, dst, Calib3d.FM_RANSAC, 1.5, .995, mask)
@@ -182,10 +183,10 @@ class StereoAnalyzer {
                     previewL.release()
                     previewR.release()
 
-                    val previewBasis = if (settings.cropMode == CropMode.FIT) {
-                        max(cropL.cols(), cropL.rows())
-                    } else {
-                        min(cropL.cols(), cropL.rows())
+                    val previewBasis = when (settings.cropMode) {
+                        CropMode.FILL -> min(cropL.cols(), cropL.rows())
+                        CropMode.FIT,
+                        CropMode.FOUR_THREE -> max(cropL.cols(), cropL.rows())
                     }
                     val previewSide = min(PREVIEW_EYE_SIDE, previewBasis).coerceAtLeast(1)
                     sbsPreview = buildSbsBitmap(cropL, cropR, previewSide, settings)
@@ -300,10 +301,10 @@ class StereoAnalyzer {
 
         val cropL = fullLeft.submat(top, bottom, left, right)
         val cropR = warpedRight.submat(top, bottom, left, right)
-        val basis = if (settings.cropMode == CropMode.FIT) {
-            max(cropL.cols(), cropL.rows())
-        } else {
-            min(cropL.cols(), cropL.rows())
+        val basis = when (settings.cropMode) {
+            CropMode.FILL -> min(cropL.cols(), cropL.rows())
+            CropMode.FIT,
+            CropMode.FOUR_THREE -> max(cropL.cols(), cropL.rows())
         }
         val finalSide = Geometry.fullOutputSide(basis).coerceAtLeast(1)
         val joined = renderSbs(cropL, cropR, finalSide, settings)
@@ -348,39 +349,89 @@ class StereoAnalyzer {
     private fun renderEye(source: Mat, side: Int, settings: RenderSettings): Mat {
         require(side > 0)
         val bias = settings.verticalBias.coerceIn(-1f, 1f)
+
+        return when (settings.cropMode) {
+            CropMode.FIT -> fitInsideSquare(source, side, bias)
+            CropMode.FOUR_THREE -> {
+                val framed = cropToFourThreeOrThreeFour(source, bias)
+                val output = fitInsideSquare(framed, side, 0f)
+                framed.release()
+                output
+            }
+            CropMode.FILL -> fillSquare(source, side, bias)
+        }
+    }
+
+    /**
+     * Yatay görüntüyü 4:3, dikey görüntüyü 3:4 yapar.
+     * Oran değişmez; yalnızca fazla kenar kırpılır. Portre görüntülerde
+     * verticalBias, kullanıcının/tarama ayarının üst-alt kompozisyon tercihini
+     * doğrudan belirler.
+     */
+    private fun cropToFourThreeOrThreeFour(source: Mat, bias: Float): Mat {
         val sourceW = source.cols()
         val sourceH = source.rows()
+        val targetAspect = if (sourceW >= sourceH) 4.0 / 3.0 else 3.0 / 4.0
+        val sourceAspect = sourceW.toDouble() / sourceH
 
-        return if (settings.cropMode == CropMode.FIT) {
-            val scale = min(side.toDouble() / sourceW, side.toDouble() / sourceH)
-            val outW = (sourceW * scale).roundToInt().coerceIn(1, side)
-            val outH = (sourceH * scale).roundToInt().coerceIn(1, side)
-            val resized = Mat()
-            Imgproc.resize(source, resized, Size(outW.toDouble(), outH.toDouble()))
-            val canvas = Mat.zeros(side, side, source.type())
-            val x = (side - outW) / 2
-            val freeY = side - outH
-            val y = ((bias + 1f) * .5f * freeY).roundToInt().coerceIn(0, freeY)
-            val roi = canvas.submat(y, y + outH, x, x + outW)
-            resized.copyTo(roi)
-            roi.release()
-            resized.release()
-            canvas
-        } else {
-            val scale = max(side.toDouble() / sourceW, side.toDouble() / sourceH)
-            val outW = max(side, (sourceW * scale).roundToInt())
-            val outH = max(side, (sourceH * scale).roundToInt())
-            val resized = Mat()
-            Imgproc.resize(source, resized, Size(outW.toDouble(), outH.toDouble()))
-            val x = ((outW - side) / 2).coerceAtLeast(0)
-            val freeY = (outH - side).coerceAtLeast(0)
-            val y = ((bias + 1f) * .5f * freeY).roundToInt().coerceIn(0, freeY)
-            val roi = resized.submat(y, y + side, x, x + side)
+        if (abs(sourceAspect - targetAspect) < 1e-6) return source.clone()
+
+        return if (sourceAspect > targetAspect) {
+            val cropW = (sourceH * targetAspect).roundToInt().coerceIn(1, sourceW)
+            val x = ((sourceW - cropW) / 2).coerceAtLeast(0)
+            val roi = source.submat(0, sourceH, x, x + cropW)
             val cropped = roi.clone()
             roi.release()
-            resized.release()
+            cropped
+        } else {
+            val cropH = (sourceW / targetAspect).roundToInt().coerceIn(1, sourceH)
+            val freeY = (sourceH - cropH).coerceAtLeast(0)
+            val y = ((bias + 1f) * .5f * freeY).roundToInt().coerceIn(0, freeY)
+            val roi = source.submat(y, y + cropH, 0, sourceW)
+            val cropped = roi.clone()
+            roi.release()
             cropped
         }
+    }
+
+    private fun fitInsideSquare(source: Mat, side: Int, verticalCanvasBias: Float): Mat {
+        val sourceW = source.cols()
+        val sourceH = source.rows()
+        val scale = min(side.toDouble() / sourceW, side.toDouble() / sourceH)
+        val outW = (sourceW * scale).roundToInt().coerceIn(1, side)
+        val outH = (sourceH * scale).roundToInt().coerceIn(1, side)
+        val resized = Mat()
+        Imgproc.resize(source, resized, Size(outW.toDouble(), outH.toDouble()))
+
+        val canvas = Mat.zeros(side, side, source.type())
+        val x = (side - outW) / 2
+        val freeY = side - outH
+        val y = ((verticalCanvasBias.coerceIn(-1f, 1f) + 1f) * .5f * freeY)
+            .roundToInt()
+            .coerceIn(0, freeY)
+        val roi = canvas.submat(y, y + outH, x, x + outW)
+        resized.copyTo(roi)
+        roi.release()
+        resized.release()
+        return canvas
+    }
+
+    private fun fillSquare(source: Mat, side: Int, bias: Float): Mat {
+        val sourceW = source.cols()
+        val sourceH = source.rows()
+        val scale = max(side.toDouble() / sourceW, side.toDouble() / sourceH)
+        val outW = max(side, (sourceW * scale).roundToInt())
+        val outH = max(side, (sourceH * scale).roundToInt())
+        val resized = Mat()
+        Imgproc.resize(source, resized, Size(outW.toDouble(), outH.toDouble()))
+        val x = ((outW - side) / 2).coerceAtLeast(0)
+        val freeY = (outH - side).coerceAtLeast(0)
+        val y = ((bias.coerceIn(-1f, 1f) + 1f) * .5f * freeY).roundToInt().coerceIn(0, freeY)
+        val roi = resized.submat(y, y + side, x, x + side)
+        val cropped = roi.clone()
+        roi.release()
+        resized.release()
+        return cropped
     }
 
     private fun rigidMatrix(width: Int, height: Int, alignment: RigidAlignment): Mat {
