@@ -114,11 +114,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         left = reader.bitmap(pair.left.uri, FINAL_SOURCE_MAX_SIDE)
                         right = reader.bitmap(pair.right.uri, FINAL_SOURCE_MAX_SIDE)
                         result = analyzer.analyze(
-                            pair,
-                            left,
-                            right,
-                            snapshot.maxSeconds,
-                            snapshot.similarity
+                            pair = pair,
+                            leftBitmap = left,
+                            rightBitmap = right,
+                            maxSeconds = snapshot.maxSeconds,
+                            threshold = snapshot.similarity,
+                            enforceSelectionFilters = true
                         )
 
                         if (result.status == PairStatus.MATCHED) {
@@ -177,7 +178,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Eski seçili-fotoğraf akışı kodda tutuluyor; tam tarama arayüzü bunu kullanmıyor. */
     fun select(uris: List<Uri>) {
         work?.cancel()
         viewModelScope.launch(Dispatchers.IO) {
@@ -185,53 +185,63 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 runCatching { reader.metadata(uri) }.getOrNull()
             }
             _state.value = _state.value.copy(
-                selected = PairPolicy.sorted(photos),
-                message = if (photos.size < 2) "En az iki fotoğraf seçin." else null,
-                stage = "${photos.size} fotoğraf seçildi"
+                selected = photos,
+                results = emptyList(),
+                message = if (photos.size < 2) "İki fotoğraf seçin." else null,
+                stage = if (photos.size == 2) {
+                    "2 fotoğraf seçildi · manuel çiftte zaman ve benzerlik eşiği uygulanmaz"
+                } else {
+                    "${photos.size} fotoğraf seçildi"
+                }
             )
         }
     }
 
     fun analyze() {
-        if (_state.value.selected.size < 2) {
-            _state.value = _state.value.copy(message = "En az iki fotoğraf seçin.")
+        if (_state.value.selected.size != 2) {
+            _state.value = _state.value.copy(message = "Tam olarak iki fotoğraf seçin.")
             return
         }
         work?.cancel()
         work = viewModelScope.launch(Dispatchers.Default) {
             val snapshot = _state.value
-            val pairs = PairPolicy.adjacent(snapshot.selected)
-                .filter { it.seconds != null && it.seconds!! <= snapshot.maxSeconds }
-            val results = mutableListOf<AnalysisResult>()
+            // Manuel seçimde kullanıcının seçtiği sıra korunur ve zaman filtresi
+            // uygulanmaz. Kullanıcı bu iki fotoğrafın birlikte denenmesini istemiştir.
+            val pair = PairCandidate(1, snapshot.selected[0], snapshot.selected[1])
             val analyzer = StereoAnalyzer()
             _state.value = snapshot.copy(
                 busy = true,
                 results = emptyList(),
                 message = null,
-                stage = "Özellik noktaları inceleniyor",
+                stage = "Seçilen stereo çift hizalanıyor",
                 progress = 0f
             )
             try {
-                pairs.forEachIndexed { i, pair ->
-                    ensureActive()
-                    _state.value = _state.value.copy(stage = "Çift ${i + 1}/${pairs.size} hizalanıyor")
-                    val l = reader.bitmap(pair.left.uri, FINAL_SOURCE_MAX_SIDE)
-                    val r = reader.bitmap(pair.right.uri, FINAL_SOURCE_MAX_SIDE)
-                    val result = try {
-                        analyzer.analyze(pair, l, r, snapshot.maxSeconds, snapshot.similarity)
-                    } finally {
-                        if (!l.isRecycled) l.recycle()
-                        if (!r.isRecycled) r.recycle()
-                    }
-                    results += result
-                    _state.value = _state.value.copy(
-                        results = results.toList(),
-                        progress = if (pairs.isEmpty()) 1f else (i + 1f) / pairs.size
+                val l = reader.bitmap(pair.left.uri, FINAL_SOURCE_MAX_SIDE)
+                val r = reader.bitmap(pair.right.uri, FINAL_SOURCE_MAX_SIDE)
+                val result = try {
+                    analyzer.analyze(
+                        pair = pair,
+                        leftBitmap = l,
+                        rightBitmap = r,
+                        maxSeconds = snapshot.maxSeconds,
+                        threshold = snapshot.similarity,
+                        enforceSelectionFilters = false
                     )
+                } finally {
+                    if (!l.isRecycled) l.recycle()
+                    if (!r.isRecycled) r.recycle()
                 }
+
                 _state.value = _state.value.copy(
                     busy = false,
-                    stage = "Tamamlandı: ${results.count { it.saveable }}/${results.size} çift eşleşti"
+                    results = listOf(result),
+                    progress = 1f,
+                    stage = if (result.saveable) {
+                        "Manuel çift hizalandı · sonucu kontrol edip kaydedebilirsiniz"
+                    } else {
+                        "Manuel çift güvenilir biçimde hizalanamadı: ${result.status.text}"
+                    }
                 )
             } catch (_: CancellationException) {
                 _state.value = _state.value.copy(busy = false, stage = "İşlem iptal edildi")
