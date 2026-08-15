@@ -82,7 +82,7 @@ fun Screen(vm: MainViewModel = viewModel()) {
             item {
                 Card {
                     Text(
-                        "İki çalışma biçimi vardır: İsterseniz bir stereo çifti kendiniz seçin, isterseniz galeriyi otomatik taratın. Kaynak fotoğraflar hiçbir zaman silinmez, taşınmaz veya değiştirilmez.",
+                        "İki çalışma biçimi vardır: İsterseniz bir stereo çifti kendiniz seçin, isterseniz galeriyi otomatik taratın. Manuel seçimde zaman ve benzerlik eşikleri uygulanmaz; görüntülerin gerçek eşleşmeleri ve rigid hizalama doğrudan denenir.",
                         Modifier.padding(14.dp)
                     )
                 }
@@ -141,7 +141,7 @@ fun Screen(vm: MainViewModel = viewModel()) {
             }
 
             item {
-                Text("Azami zaman farkı: ${state.maxSeconds} saniye")
+                Text("Otomatik tarama · azami zaman farkı: ${state.maxSeconds} saniye")
                 Slider(
                     value = state.maxSeconds.toFloat(),
                     onValueChange = { vm.maxSeconds(it.toInt()) },
@@ -150,7 +150,7 @@ fun Screen(vm: MainViewModel = viewModel()) {
                     enabled = !state.busy
                 )
 
-                Text("Benzerlik eşiği: %${state.similarity}")
+                Text("Otomatik tarama · benzerlik eşiği: %${state.similarity}")
                 Slider(
                     value = state.similarity.toFloat(),
                     onValueChange = { vm.similarity(it.toInt()) },
