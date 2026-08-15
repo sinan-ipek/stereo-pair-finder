@@ -352,7 +352,7 @@ class StereoAnalyzer {
         val bias = settings.verticalBias.coerceIn(-1f, 1f)
 
         return when (settings.cropMode) {
-            CropMode.FIT -> fitInsideSquare(source, side, bias)
+            CropMode.FIT -> fitInsideSquare(source, side, 0f)
             CropMode.FOUR_THREE -> {
                 val framed = cropToFourThreeOrThreeFour(source, bias)
                 val output = fitInsideSquare(framed, side, 0f)

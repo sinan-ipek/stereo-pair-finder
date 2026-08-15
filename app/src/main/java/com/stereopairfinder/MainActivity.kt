@@ -231,7 +231,7 @@ private fun ScanSettingsDialog(
                 }
                 Text(
                     when (cropMode) {
-                        CropMode.FIT -> "Fit: ortak alanı mümkün olduğunca korur."
+                        CropMode.FIT -> "Fit: ortak alanı korur; siyah boşluk gerekiyorsa üst-alt eşit dağıtılır."
                         CropMode.FOUR_THREE -> "4:3: yatay fotoğrafı 4:3, dikey fotoğrafı otomatik 3:4 yapar."
                         CropMode.FILL -> "Fill: kareyi doldurur; gerekirse daha fazla kırpar."
                     },
@@ -240,9 +240,9 @@ private fun ScanSettingsDialog(
 
                 Text("Dikey kadraj")
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    ChoiceButton("Yukarı", verticalBias == -0.5f) { verticalBias = -0.5f }
-                    ChoiceButton("Ortala", verticalBias == 0f) { verticalBias = 0f }
-                    ChoiceButton("Aşağı", verticalBias == 0.5f) { verticalBias = 0.5f }
+                    ChoiceButton("Yukarı", verticalBias == -0.5f, enabled = cropMode != CropMode.FIT) { verticalBias = -0.5f }
+                    ChoiceButton("Ortala", verticalBias == 0f, enabled = cropMode != CropMode.FIT) { verticalBias = 0f }
+                    ChoiceButton("Aşağı", verticalBias == 0.5f, enabled = cropMode != CropMode.FIT) { verticalBias = 0.5f }
                 }
 
                 HorizontalDivider()
@@ -384,7 +384,9 @@ private fun ResultCard(
                             .fillMaxSize()
                             .pointerInput(cropMode) {
                                 detectVerticalDragGestures { _, dragAmount ->
-                                    verticalBias = (verticalBias - dragAmount / 220f).coerceIn(-1f, 1f)
+                                    if (cropMode != CropMode.FIT) {
+                                        verticalBias = (verticalBias - dragAmount / 220f).coerceIn(-1f, 1f)
+                                    }
                                 }
                             }
                     ) {
@@ -402,32 +404,21 @@ private fun ResultCard(
                         )
                     }
 
-                    if (swapEyes) {
-                        Button(
-                            onClick = { swapEyes = false },
-                            modifier = Modifier
-                                .align(Alignment.Center)
-                                .size(48.dp),
-                            contentPadding = PaddingValues(0.dp)
-                        ) {
-                            Text("⇄")
-                        }
-                    } else {
-                        OutlinedButton(
-                            onClick = { swapEyes = true },
-                            modifier = Modifier
-                                .align(Alignment.Center)
-                                .size(48.dp),
-                            contentPadding = PaddingValues(0.dp)
-                        ) {
-                            Text("⇄")
-                        }
-                    }
+          FloatingActionButton(
+              onClick = { swapEyes = !swapEyes },
+              modifier = Modifier
+                  .align(Alignment.Center)
+                  .size(64.dp),
+              containerColor = MaterialTheme.colorScheme.primary,
+              contentColor = MaterialTheme.colorScheme.onPrimary
+          ) {
+              Text("⇄", style = MaterialTheme.typography.headlineSmall)
+          }
                 }
 
                 Text(
                     when (cropMode) {
-                        CropMode.FIT -> "Fit: mümkün olan ortak alanı korur. Parmağınızla iki gözü birlikte yukarı/aşağı taşıyabilirsiniz."
+                        CropMode.FIT -> "Fit: mümkün olan ortak alanı korur; siyah boşluk gerekiyorsa görüntü üst-alt tam ortalanır."
                         CropMode.FOUR_THREE -> "4:3: yataysa 4:3, dikeyse 3:4 kadraj. Parmağınızla üst-alt kompozisyonu seçebilirsiniz."
                         CropMode.FILL -> "Fill: kareyi doldurur. Parmağınızla hangi üst-alt bölgenin kalacağını seçebilirsiniz."
                     },
@@ -478,7 +469,7 @@ private fun EyePreview(
                     contentDescription = null,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit,
-                    alignment = alignment
+                    alignment = Alignment.Center
                 )
             }
 
