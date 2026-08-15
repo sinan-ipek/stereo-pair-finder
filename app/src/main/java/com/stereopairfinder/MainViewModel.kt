@@ -26,7 +26,8 @@ data class UiState(
     val candidateCount: Int = 0,
     val matchedCount: Int = 0,
     val savedCount: Int = 0,
-    val failedCount: Int = 0
+    val failedCount: Int = 0,
+    val resumeAvailable: Boolean = false
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -36,6 +37,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(UiState())
     val state = _state.asStateFlow()
     private var work: Job? = null
+
+    init {
+        _state.value = _state.value.copy(resumeAvailable = loadCheckpoint() != null)
+    }
 
     fun clearMessage() {
         if (_state.value.message != null) _state.value = _state.value.copy(message = null)
@@ -51,13 +56,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         work?.cancel()
         work = viewModelScope.launch(Dispatchers.Default) {
             val normalized = settings.copy(render = settings.render.normalized())
+
+            if (normalized.startMode == ScanStartMode.FROM_START) {
+                clearCheckpoint()
+            }
+            val requestedCheckpoint = if (normalized.startMode == ScanStartMode.RESUME) {
+                loadCheckpoint()
+            } else {
+                null
+            }
+
             _state.value = _state.value.copy(
                 selected = emptyList(),
                 results = emptyList(),
                 maxSeconds = normalized.maxSeconds,
                 similarity = normalized.similarity,
                 busy = true,
-                stage = "Telefonun fotoğraf arşivi okunuyor…",
+                stage = if (normalized.startMode == ScanStartMode.RESUME) {
+                    "Kaldığınız yer bulunuyor…"
+                } else {
+                    "Telefonun fotoğraf arşivi en baştan okunuyor…"
+                },
                 message = null,
                 progress = 0f,
                 photoCount = 0,
@@ -71,23 +90,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val photos = withContext(Dispatchers.IO) { reader.allPhotos() }
                 ensureActive()
 
-                val candidates = PairPolicy.adjacent(photos).filter { pair ->
+                val scanPhotos = if (normalized.startMode == ScanStartMode.RESUME && requestedCheckpoint != null) {
+                    PairPolicy.fromCheckpoint(photos, requestedCheckpoint)
+                } else {
+                    PairPolicy.sorted(photos)
+                }
+
+                val candidates = PairPolicy.adjacent(scanPhotos).filter { pair ->
                     val seconds = pair.seconds
                     seconds != null && seconds <= normalized.maxSeconds
+                }
+
+                val modeText = if (normalized.startMode == ScanStartMode.RESUME && requestedCheckpoint != null) {
+                    "Devam"
+                } else {
+                    "Baştan"
                 }
 
                 _state.value = _state.value.copy(
                     photoCount = photos.size,
                     candidateCount = candidates.size,
-                    stage = "${photos.size} fotoğraf bulundu · ${candidates.size} olası çift incelenecek"
+                    stage = "$modeText taraması · ${photos.size} fotoğraf · ${candidates.size} olası çift"
                 )
 
                 if (candidates.isEmpty()) {
+                    scanPhotos.lastOrNull()?.let(::saveCheckpoint)
                     prefs.edit().putLong(KEY_LAST_FULL_SCAN, System.currentTimeMillis()).apply()
                     _state.value = _state.value.copy(
                         busy = false,
                         progress = 1f,
-                        stage = "Tam tarama tamamlandı: uygun zaman aralığında çift bulunamadı"
+                        stage = if (normalized.startMode == ScanStartMode.RESUME && requestedCheckpoint != null) {
+                            "Kaldığınız yerden sonra incelenecek yeni stereo adayı yok"
+                        } else {
+                            "Tam tarama tamamlandı: uygun zaman aralığında çift bulunamadı"
+                        }
                     )
                     return@launch
                 }
@@ -100,7 +136,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 candidates.forEachIndexed { index, pair ->
                     ensureActive()
                     _state.value = _state.value.copy(
-                        stage = "Olası çift ${index + 1}/${candidates.size} inceleniyor · $saved kaydedildi"
+                        stage = "$modeText · olası çift ${index + 1}/${candidates.size} inceleniyor · $saved kaydedildi"
                     )
 
                     var left: Bitmap? = null
@@ -145,6 +181,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         right?.let { if (!it.isRecycled) it.recycle() }
                     }
 
+                    // Bu çift tamamen işlendi. Uygulama bundan sonra kapanırsa
+                    // Devam seçeneği sağ fotoğraftan sonraki komşuyla devam eder.
+                    saveCheckpoint(pair.right)
+
                     _state.value = _state.value.copy(
                         matchedCount = matched,
                         savedCount = saved,
@@ -153,6 +193,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
 
+                // Zaman filtresine girmemiş son fotoğrafları da checkpoint'e taşı.
+                // Sonraki yeni fotoğrafla sınır çifti yine korunur; çünkü resume
+                // listesi checkpoint fotoğrafının kendisini de içerir.
+                scanPhotos.lastOrNull()?.let(::saveCheckpoint)
                 prefs.edit().putLong(KEY_LAST_FULL_SCAN, System.currentTimeMillis()).apply()
                 _state.value = _state.value.copy(
                     busy = false,
@@ -160,10 +204,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     matchedCount = matched,
                     savedCount = saved,
                     failedCount = failed,
-                    stage = "Tam tarama tamamlandı: $matched stereo çift bulundu, $saved SBS kaydedildi"
+                    stage = "$modeText taraması tamamlandı: $matched stereo çift bulundu, $saved SBS kaydedildi"
                 )
             } catch (_: CancellationException) {
-                _state.value = _state.value.copy(busy = false, stage = "Tarama iptal edildi")
+                _state.value = _state.value.copy(
+                    busy = false,
+                    stage = "Tarama iptal edildi · ▶ Devam ile son işlenen noktadan sürdürebilirsiniz"
+                )
             } catch (t: Throwable) {
                 _state.value = _state.value.copy(
                     busy = false,
@@ -231,7 +278,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     results = listOf(result),
                     progress = 1f,
                     stage = if (result.saveable) {
-                        "Manuel çift hizalandı · Fit/Fill ve dikey kadrajı ayarlayabilirsiniz"
+                        "Manuel çift hizalandı · Fit / 4:3 / Fill ve dikey kadrajı ayarlayabilirsiniz"
                     } else {
                         "Manuel çift güvenilir biçimde hizalanamadı: ${result.status.text}"
                     }
@@ -301,6 +348,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         work?.cancel()
     }
 
+    private fun loadCheckpoint(): ScanCheckpoint? {
+        if (!prefs.contains(KEY_CHECKPOINT_TAKEN) || !prefs.contains(KEY_CHECKPOINT_ID)) return null
+        val taken = prefs.getLong(KEY_CHECKPOINT_TAKEN, Long.MIN_VALUE)
+        val id = prefs.getLong(KEY_CHECKPOINT_ID, Long.MIN_VALUE)
+        if (taken == Long.MIN_VALUE || id == Long.MIN_VALUE) return null
+        return ScanCheckpoint(takenAtMillis = taken, mediaStoreId = id)
+    }
+
+    private fun saveCheckpoint(photo: Photo) {
+        val checkpoint = PairPolicy.checkpointOf(photo) ?: return
+        prefs.edit()
+            .putLong(KEY_CHECKPOINT_TAKEN, checkpoint.takenAtMillis)
+            .putLong(KEY_CHECKPOINT_ID, checkpoint.mediaStoreId)
+            .apply()
+        if (!_state.value.resumeAvailable) {
+            _state.value = _state.value.copy(resumeAvailable = true)
+        }
+    }
+
+    private fun clearCheckpoint() {
+        prefs.edit()
+            .remove(KEY_CHECKPOINT_TAKEN)
+            .remove(KEY_CHECKPOINT_ID)
+            .apply()
+        _state.value = _state.value.copy(resumeAvailable = false)
+    }
+
     private fun recycleResults(results: List<AnalysisResult>) = results.forEach(::recycleResult)
 
     private fun recycleResult(result: AnalysisResult?) {
@@ -316,5 +390,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         private const val FINAL_SOURCE_MAX_SIDE = 4096
         private const val KEY_LAST_FULL_SCAN = "last_full_scan_millis"
+        private const val KEY_CHECKPOINT_TAKEN = "scan_checkpoint_taken_millis"
+        private const val KEY_CHECKPOINT_ID = "scan_checkpoint_media_store_id"
     }
 }
