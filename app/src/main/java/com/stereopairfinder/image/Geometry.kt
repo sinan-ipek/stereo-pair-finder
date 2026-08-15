@@ -1,7 +1,12 @@
 package com.stereopairfinder.image
 
 import kotlin.math.abs
+import kotlin.math.atan
+import kotlin.math.cos
+import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
+
 
 data class CropSquare(val left: Int, val top: Int, val right: Int, val bottom: Int) {
     val width: Int get() = right - left
@@ -14,16 +19,30 @@ data class ParallaxSample(
     val disparity: Double
 )
 
+data class MatchSample(
+    val leftX: Double,
+    val leftY: Double,
+    val rightX: Double,
+    val rightY: Double
+)
+
+data class RigidAlignment(
+    val angleDegrees: Double,
+    val translateX: Double,
+    val translateY: Double,
+    val medianVerticalError: Double,
+    val translationOnlyVerticalError: Double,
+    val rotationApplied: Boolean
+)
+
 object Geometry {
     /**
      * Finds the largest axis-aligned square whose every pixel is valid.
      *
-     * Perspective warps can leave triangular invalid corners. The square size is
-     * therefore determined only from fully valid pixels. When several equally
-     * large squares are possible, rectified feature matches are used to prefer
-     * the region with the strongest average horizontal parallax. If no usable
-     * parallax sample falls inside any candidate, the candidate closest to the
-     * image center is selected.
+     * With rigid alignment the valid mask is rectangular for translation and
+     * has only small corner losses when the optional tiny rotation is used.
+     * When several equally large squares are possible, feature matches are
+     * used to prefer the region with stronger horizontal stereo parallax.
      */
     fun largestValidSquare(
         mask: ByteArray,
@@ -137,6 +156,126 @@ object Geometry {
         return selected
     }
 
+    /**
+     * Estimates the only geometry Stereo Pair Finder is allowed to apply.
+     *
+     * 1) Translation is always the baseline model.
+     * 2) A tiny roll correction is considered only inside +/- 1 degree.
+     * 3) Rotation is used only when it measurably improves vertical alignment.
+     *
+     * Scale, shear and perspective terms do not exist in this model.
+     */
+    fun estimateRigidAlignment(
+        samples: List<MatchSample>,
+        width: Int,
+        height: Int
+    ): RigidAlignment? {
+        if (width <= 0 || height <= 0) return null
+        val finite = samples.filter {
+            it.leftX.isFinite() && it.leftY.isFinite() &&
+                it.rightX.isFinite() && it.rightY.isFinite()
+        }
+        if (finite.size < MIN_ALIGNMENT_SAMPLES) return null
+
+        val translation = evaluateAlignment(finite, width, height, 0.0)
+        val rotationCandidate = estimateRotationCandidate(finite, width, height)
+
+        if (rotationCandidate == null) return translation
+
+        val improvement = translation.medianVerticalError - rotationCandidate.medianVerticalError
+        val requiredImprovement = max(
+            MIN_ROTATION_IMPROVEMENT_PX,
+            translation.medianVerticalError * MIN_ROTATION_IMPROVEMENT_FRACTION
+        )
+        val usefulAngle = abs(rotationCandidate.angleDegrees) >= MIN_USEFUL_ROTATION_DEG
+        val usefulImprovement = improvement >= requiredImprovement
+
+        return if (usefulAngle && usefulImprovement) {
+            rotationCandidate.copy(
+                translationOnlyVerticalError = translation.medianVerticalError,
+                rotationApplied = true
+            )
+        } else {
+            translation
+        }
+    }
+
+    private fun estimateRotationCandidate(
+        samples: List<MatchSample>,
+        width: Int,
+        height: Int
+    ): RigidAlignment? {
+        val subset = if (samples.size <= MAX_ROTATION_SAMPLES) {
+            samples
+        } else {
+            List(MAX_ROTATION_SAMPLES) { index ->
+                val sourceIndex = index * (samples.size - 1) / (MAX_ROTATION_SAMPLES - 1)
+                samples[sourceIndex]
+            }
+        }
+
+        var best: RigidAlignment? = null
+        val minHorizontalSeparation = width * MIN_SLOPE_BASELINE_FRACTION
+
+        for (i in 0 until subset.lastIndex) {
+            val first = subset[i]
+            val firstDy = first.leftY - first.rightY
+            for (j in i + 1 until subset.size) {
+                val second = subset[j]
+                val dx = second.rightX - first.rightX
+                if (abs(dx) < minHorizontalSeparation) continue
+
+                val secondDy = second.leftY - second.rightY
+                val slope = (secondDy - firstDy) / dx
+                val angleDegrees = Math.toDegrees(atan(slope))
+                if (!angleDegrees.isFinite() || abs(angleDegrees) > MAX_ROTATION_DEG) continue
+
+                val candidate = evaluateAlignment(samples, width, height, angleDegrees)
+                if (best == null || candidate.medianVerticalError < best.medianVerticalError) {
+                    best = candidate
+                }
+            }
+        }
+
+        return best
+    }
+
+    private fun evaluateAlignment(
+        samples: List<MatchSample>,
+        width: Int,
+        height: Int,
+        angleDegrees: Double
+    ): RigidAlignment {
+        val centerX = width / 2.0
+        val centerY = height / 2.0
+        val radians = Math.toRadians(angleDegrees)
+        val c = cos(radians)
+        val s = sin(radians)
+
+        val rotated = samples.map { sample ->
+            val x = sample.rightX - centerX
+            val y = sample.rightY - centerY
+            val rx = c * x - s * y + centerX
+            val ry = s * x + c * y + centerY
+            Triple(sample, rx, ry)
+        }
+
+        val tx = median(rotated.map { (sample, rx, _) -> sample.leftX - rx })
+        val ty = median(rotated.map { (sample, _, ry) -> sample.leftY - ry })
+        val verticalError = median(
+            rotated.map { (sample, _, ry) -> abs((ry + ty) - sample.leftY) }
+        )
+
+        return RigidAlignment(
+            angleDegrees = angleDegrees,
+            translateX = tx,
+            translateY = ty,
+            medianVerticalError = verticalError,
+            translationOnlyVerticalError = verticalError,
+            rotationApplied = false
+        )
+    }
+
     /** UI preview stays memory-friendly. */
     fun outputSide(sourceSide: Int) = min(sourceSide, 2048)
 
@@ -153,9 +292,13 @@ object Geometry {
         }
     }
 
-    fun saneHomography(values: DoubleArray): Boolean =
-        values.size == 9 &&
-            values.all { it.isFinite() } &&
-            kotlin.math.abs(values[8]) > 1e-8 &&
-            values.maxOf { kotlin.math.abs(it) } < 1e5
+    companion object {
+        const val MAX_ROTATION_DEG = 1.0
+        private const val MIN_ALIGNMENT_SAMPLES = 8
+        private const val MAX_ROTATION_SAMPLES = 80
+        private const val MIN_SLOPE_BASELINE_FRACTION = 0.08
+        private const val MIN_USEFUL_ROTATION_DEG = 0.05
+        private const val MIN_ROTATION_IMPROVEMENT_PX = 0.25
+        private const val MIN_ROTATION_IMPROVEMENT_FRACTION = 0.20
+    }
 }
