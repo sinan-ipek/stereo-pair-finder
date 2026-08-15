@@ -330,6 +330,7 @@ private fun ResultCard(
     var showRight by remember(result.pair.index) { mutableStateOf(false) }
     var cropMode by remember(result.pair.index) { mutableStateOf(CropMode.FIT) }
     var verticalBias by remember(result.pair.index) { mutableFloatStateOf(0f) }
+    var swapEyes by remember(result.pair.index) { mutableStateOf(false) }
     val formatter = remember {
         DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss.SSS")
             .withZone(ZoneId.systemDefault())
@@ -337,6 +338,9 @@ private fun ResultCard(
 
     fun formatTime(value: Long?): String =
         value?.let { formatter.format(Instant.ofEpochMilli(it)) } ?: "Bulunamadı"
+
+    val displayedLeftPhoto = if (swapEyes) result.pair.right else result.pair.left
+    val displayedRightPhoto = if (swapEyes) result.pair.left else result.pair.right
 
     Card {
         Column(
@@ -347,8 +351,8 @@ private fun ResultCard(
                 "Çift ${result.pair.index}: ${result.status.text}",
                 style = MaterialTheme.typography.titleMedium
             )
-            Text("Sol: ${formatTime(result.pair.left.takenAtMillis)}")
-            Text("Sağ: ${formatTime(result.pair.right.takenAtMillis)}")
+            Text("Sol: ${formatTime(displayedLeftPhoto.takenAtMillis)}")
+            Text("Sağ: ${formatTime(displayedRightPhoto.takenAtMillis)}")
             Text(
                 "Benzerlik %.1f%% · %d güvenilir eşleşme · düşey hata %.2f px".format(
                     result.similarity,
@@ -364,8 +368,14 @@ private fun ResultCard(
                     ChoiceButton("Fit", cropMode == CropMode.FIT) { cropMode = CropMode.FIT }
                     ChoiceButton("4:3", cropMode == CropMode.FOUR_THREE) { cropMode = CropMode.FOUR_THREE }
                     ChoiceButton("Fill", cropMode == CropMode.FILL) { cropMode = CropMode.FILL }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ChoiceButton("⇄", swapEyes) { swapEyes = !swapEyes }
                     OutlinedButton(onClick = { verticalBias = 0f }) { Text("Sıfırla") }
                 }
+
+                val displayedLeftPreview = if (swapEyes) result.rightPreview else result.leftPreview
+                val displayedRightPreview = if (swapEyes) result.leftPreview else result.rightPreview
 
                 Row(
                     modifier = Modifier
@@ -378,13 +388,13 @@ private fun ResultCard(
                         }
                 ) {
                     EyePreview(
-                        bitmap = result.leftPreview,
+                        bitmap = displayedLeftPreview,
                         cropMode = cropMode,
                         verticalBias = verticalBias,
                         modifier = Modifier.weight(1f).fillMaxHeight()
                     )
                     EyePreview(
-                        bitmap = result.rightPreview,
+                        bitmap = displayedRightPreview,
                         cropMode = cropMode,
                         verticalBias = verticalBias,
                         modifier = Modifier.weight(1f).fillMaxHeight()
@@ -400,7 +410,7 @@ private fun ResultCard(
                     style = MaterialTheme.typography.bodySmall
                 )
 
-                val blinkBitmap = if (showRight) result.rightPreview else result.leftPreview
+                val blinkBitmap = if (showRight) displayedRightPreview else displayedLeftPreview
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Blink: ${if (showRight) "sağ" else "sol"}")
                     Switch(showRight, { showRight = it })
@@ -416,7 +426,7 @@ private fun ResultCard(
             if (result.saveable) {
                 Button(
                     onClick = {
-                        onSave(result, RenderSettings(cropMode, verticalBias))
+                        onSave(result, RenderSettings(cropMode, verticalBias, swapEyes))
                     },
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth()
