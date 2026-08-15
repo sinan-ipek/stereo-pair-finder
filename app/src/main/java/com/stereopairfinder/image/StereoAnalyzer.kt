@@ -340,7 +340,8 @@ class StereoAnalyzer {
         val outL = renderEye(left, side, settings)
         val outR = renderEye(right, side, settings)
         val joined = Mat()
-        Core.hconcat(listOf(outL, outR), joined)
+        val orderedEyes = if (settings.swapEyes) listOf(outR, outL) else listOf(outL, outR)
+        Core.hconcat(orderedEyes, joined)
         outL.release()
         outR.release()
         return joined
