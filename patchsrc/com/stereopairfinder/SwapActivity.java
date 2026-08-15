@@ -41,8 +41,8 @@ public final class SwapActivity extends ComponentActivity {
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
         try {
-            @SuppressWarnings("unchecked")
-            Function2<?, ?, Unit> content = (Function2<?, ?, Unit>) findOriginalContent();
+            @SuppressWarnings({"rawtypes", "unchecked"})
+            Function2 content = (Function2) findOriginalContent();
             compose.setContent(content);
         } catch (Throwable t) {
             throw new RuntimeException("Stereo Pair Finder arayüzü başlatılamadı", t);
