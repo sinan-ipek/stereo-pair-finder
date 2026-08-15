@@ -11,9 +11,11 @@ import org.opencv.imgproc.Imgproc
 import java.io.ByteArrayOutputStream
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 class StereoAnalyzer {
     init {
@@ -31,9 +33,13 @@ class StereoAnalyzer {
         val fullTargetH = min(leftBitmap.height, rightBitmap.height)
         require(fullTargetW > 0 && fullTargetH > 0) { "Geçersiz fotoğraf boyutu" }
 
+        // Kaynak gözler hiçbir zaman birbirlerine uydurulmak için stretch edilmez.
+        // Boyut farkı varsa yalnızca merkezden ortak alan kırpılır.
         val fullLeft = bitmapToCommonMat(leftBitmap, fullTargetW, fullTargetH)
         val fullRight = bitmapToCommonMat(rightBitmap, fullTargetW, fullTargetH)
 
+        // ORB/RANSAC analizi için iki göze de aynı, uniform küçültme uygulanır.
+        // Bu yalnızca analiz kopyasıdır; final geometriyi değiştirmez.
         val analysisScale = min(1.0, ANALYSIS_MAX_SIDE.toDouble() / maxOf(fullTargetW, fullTargetH))
         val targetW = (fullTargetW * analysisScale).roundToInt().coerceAtLeast(1)
         val targetH = (fullTargetH * analysisScale).roundToInt().coerceAtLeast(1)
@@ -76,6 +82,8 @@ class StereoAnalyzer {
         src.fromList(good.map { pL[it.queryIdx].pt })
         dst.fromList(good.map { pR[it.trainIdx].pt })
 
+        // Fundamental matrix yalnızca yanlış feature eşleşmelerini ayıklamak için
+        // kullanılır. Görüntüye hiçbir projective/perspective dönüşüm uygulanmaz.
         val mask = Mat()
         val fundamental = if (good.size >= 12) {
             Calib3d.findFundamentalMat(src, dst, Calib3d.FM_RANSAC, 1.5, .995, mask)
@@ -104,66 +112,78 @@ class StereoAnalyzer {
         var sbsJpeg: ByteArray? = null
 
         if (evidence && !fundamental.empty()) {
-            val inL = MatOfPoint2f()
-            val inR = MatOfPoint2f()
-            inL.fromList(inlierMatches.map { pL[it.queryIdx].pt })
-            inR.fromList(inlierMatches.map { pR[it.trainIdx].pt })
+            val samples = inlierMatches.map { match ->
+                val lp = pL[match.queryIdx].pt
+                val rp = pR[match.trainIdx].pt
+                MatchSample(lp.x, lp.y, rp.x, rp.y)
+            }
 
-            val h1 = Mat()
-            val h2 = Mat()
-            val ok = Calib3d.stereoRectifyUncalibrated(
-                inL,
-                inR,
-                fundamental,
-                Size(targetW.toDouble(), targetH.toDouble()),
-                h1,
-                h2,
-                5.0
-            )
-
-            if (ok && sane(h1) && sane(h2)) {
-                val warpL = Mat()
-                val warpR = Mat()
-                Imgproc.warpPerspective(left, warpL, h1, Size(targetW.toDouble(), targetH.toDouble()))
-                Imgproc.warpPerspective(right, warpR, h2, Size(targetW.toDouble(), targetH.toDouble()))
+            val alignment = Geometry.estimateRigidAlignment(samples, targetW, targetH)
+            if (alignment != null) {
+                val matrix = rigidMatrix(targetW, targetH, alignment)
+                val warpedRight = Mat()
+                Imgproc.warpAffine(
+                    right,
+                    warpedRight,
+                    matrix,
+                    Size(targetW.toDouble(), targetH.toDouble()),
+                    Imgproc.INTER_LINEAR,
+                    Core.BORDER_CONSTANT,
+                    Scalar.all(0.0)
+                )
 
                 val one = Mat.ones(targetH, targetW, CvType.CV_8U)
-                val m1 = Mat()
-                val m2 = Mat()
-                Imgproc.warpPerspective(one, m1, h1, Size(targetW.toDouble(), targetH.toDouble()), Imgproc.INTER_NEAREST)
-                Imgproc.warpPerspective(one, m2, h2, Size(targetW.toDouble(), targetH.toDouble()), Imgproc.INTER_NEAREST)
+                val validRight = Mat()
+                Imgproc.warpAffine(
+                    one,
+                    validRight,
+                    matrix,
+                    Size(targetW.toDouble(), targetH.toDouble()),
+                    Imgproc.INTER_NEAREST,
+                    Core.BORDER_CONSTANT,
+                    Scalar.all(0.0)
+                )
 
-                val common = Mat()
-                Core.bitwise_and(m1, m2, common)
-                area = Core.countNonZero(common).toDouble() / (targetW * targetH)
-
+                area = Core.countNonZero(validRight).toDouble() / (targetW * targetH)
                 val validPixels = ByteArray(targetW * targetH)
-                common.get(0, 0, validPixels)
+                validRight.get(0, 0, validPixels)
 
-                val transformedL = MatOfPoint2f()
-                val transformedR = MatOfPoint2f()
-                Core.perspectiveTransform(inL, transformedL, h1)
-                Core.perspectiveTransform(inR, transformedR, h2)
-                val rectifiedPairs = transformedL.toArray().zip(transformedR.toArray())
+                val transformedPairs = samples.map { sample ->
+                    val transformed = transformRightPoint(
+                        sample.rightX,
+                        sample.rightY,
+                        targetW,
+                        targetH,
+                        alignment
+                    )
+                    Pair(Point(sample.leftX, sample.leftY), transformed)
+                }
 
-                median = Geometry.median(rectifiedPairs.map { abs(it.first.y - it.second.y) })
-                val parallaxSamples = rectifiedPairs.map { (leftPoint, rightPoint) ->
+                median = Geometry.median(
+                    transformedPairs.map { (lp, rp) -> abs(lp.y - rp.y) }
+                )
+                val parallaxSamples = transformedPairs.map { (lp, rp) ->
                     ParallaxSample(
-                        x = (leftPoint.x + rightPoint.x) / 2.0,
-                        y = (leftPoint.y + rightPoint.y) / 2.0,
-                        disparity = abs(leftPoint.x - rightPoint.x)
+                        x = (lp.x + rp.x) / 2.0,
+                        y = (lp.y + rp.y) / 2.0,
+                        disparity = abs(lp.x - rp.x)
                     )
                 }
-                val square = Geometry.largestValidSquare(validPixels, targetW, targetH, parallaxSamples)
+                val square = Geometry.largestValidSquare(
+                    validPixels,
+                    targetW,
+                    targetH,
+                    parallaxSamples
+                )
 
                 if (square != null) {
                     confidence = (100.0 - median * 15.0).coerceIn(0.0, 100.0) *
                         (inlierMatches.size / (inlierMatches.size + 15.0))
-                    aligned = median <= 2.5 && area >= .35
+                    aligned = median <= MAX_VERTICAL_ERROR_PX && area >= .35
 
                     if (aligned) {
-                        val cropL = warpL.submat(square.top, square.bottom, square.left, square.right)
-                        val cropR = warpR.submat(square.top, square.bottom, square.left, square.right)
+                        val cropL = left.submat(square.top, square.bottom, square.left, square.right)
+                        val cropR = warpedRight.submat(square.top, square.bottom, square.left, square.right)
                         val previewSide = Geometry.outputSide(square.width)
                         val outL = Mat()
                         val outR = Mat()
@@ -180,12 +200,25 @@ class StereoAnalyzer {
                         sbsPreview = joinedPreview.bitmap()
 
                         val candidateStatus = PairPolicy.status(
-                            pair, similarity, evidence, aligned, confidence, area, maxSeconds, threshold
+                            pair,
+                            similarity,
+                            evidence,
+                            aligned,
+                            confidence,
+                            area,
+                            maxSeconds,
+                            threshold
                         )
                         if (candidateStatus == PairStatus.MATCHED) {
                             sbsJpeg = buildFullResolutionJpeg(
-                                fullLeft, fullRight, h1, h2, square,
-                                targetW, targetH, fullTargetW, fullTargetH
+                                fullLeft,
+                                fullRight,
+                                alignment,
+                                square,
+                                targetW,
+                                targetH,
+                                fullTargetW,
+                                fullTargetH
                             )
                         }
 
@@ -197,40 +230,46 @@ class StereoAnalyzer {
                     }
                 }
 
-                transformedL.release()
-                transformedR.release()
-                warpL.release()
-                warpR.release()
+                matrix.release()
+                warpedRight.release()
                 one.release()
-                m1.release()
-                m2.release()
-                common.release()
+                validRight.release()
             }
-
-            h1.release()
-            h2.release()
-            inL.release()
-            inR.release()
         }
 
         val status = PairPolicy.status(
-            pair, similarity, evidence, aligned, confidence, area, maxSeconds, threshold
+            pair,
+            similarity,
+            evidence,
+            aligned,
+            confidence,
+            area,
+            maxSeconds,
+            threshold
         )
 
         listOf(fullLeft, fullRight, left, right, grayL, grayR, kpL, kpR, dL, dR, src, dst, mask, fundamental)
             .forEach { it.release() }
 
         return AnalysisResult(
-            pair, similarity, inlierMatches.size, confidence, median, area, status,
-            leftPreview, rightPreview, sbsPreview, sbsJpeg
+            pair,
+            similarity,
+            inlierMatches.size,
+            confidence,
+            median,
+            area,
+            status,
+            leftPreview,
+            rightPreview,
+            sbsPreview,
+            sbsJpeg
         )
     }
 
     private fun buildFullResolutionJpeg(
         fullLeft: Mat,
         fullRight: Mat,
-        h1: Mat,
-        h2: Mat,
+        alignment: RigidAlignment,
         square: CropSquare,
         analysisW: Int,
         analysisH: Int,
@@ -239,20 +278,34 @@ class StereoAnalyzer {
     ): ByteArray {
         val scaleX = fullW.toDouble() / analysisW
         val scaleY = fullH.toDouble() / analysisH
-        val fullH1 = scaleHomography(h1, scaleX, scaleY)
-        val fullH2 = scaleHomography(h2, scaleX, scaleY)
+        val fullAlignment = alignment.copy(
+            translateX = alignment.translateX * scaleX,
+            translateY = alignment.translateY * scaleY,
+            medianVerticalError = alignment.medianVerticalError * scaleY,
+            translationOnlyVerticalError = alignment.translationOnlyVerticalError * scaleY
+        )
 
-        val warpL = Mat()
-        val warpR = Mat()
-        Imgproc.warpPerspective(fullLeft, warpL, fullH1, Size(fullW.toDouble(), fullH.toDouble()))
-        Imgproc.warpPerspective(fullRight, warpR, fullH2, Size(fullW.toDouble(), fullH.toDouble()))
-        fullH1.release()
-        fullH2.release()
+        val matrix = rigidMatrix(fullW, fullH, fullAlignment)
+        val warpedRight = Mat()
+        Imgproc.warpAffine(
+            fullRight,
+            warpedRight,
+            matrix,
+            Size(fullW.toDouble(), fullH.toDouble()),
+            Imgproc.INTER_LINEAR,
+            Core.BORDER_CONSTANT,
+            Scalar.all(0.0)
+        )
+        matrix.release()
 
-        val scaledLeft = floor(square.left * scaleX).toInt().coerceIn(0, fullW - 1)
-        val scaledTop = floor(square.top * scaleY).toInt().coerceIn(0, fullH - 1)
-        val scaledRight = ceil(square.right * scaleX).toInt().coerceIn(scaledLeft + 1, fullW)
-        val scaledBottom = ceil(square.bottom * scaleY).toInt().coerceIn(scaledTop + 1, fullH)
+        // Analiz maskesinde tamamen geçerli olan karenin tam çözünürlükteki
+        // karşılığını al. Birkaç analiz pikseli içeri girerek yuvarlama sınırını
+        // güvenli tarafta bırakıyoruz.
+        val safeSquare = insetSquare(square, SAFE_CROP_INSET_PX)
+        val scaledLeft = floor(safeSquare.left * scaleX).toInt().coerceIn(0, fullW - 1)
+        val scaledTop = floor(safeSquare.top * scaleY).toInt().coerceIn(0, fullH - 1)
+        val scaledRight = ceil(safeSquare.right * scaleX).toInt().coerceIn(scaledLeft + 1, fullW)
+        val scaledBottom = ceil(safeSquare.bottom * scaleY).toInt().coerceIn(scaledTop + 1, fullH)
         val rawSide = min(scaledRight - scaledLeft, scaledBottom - scaledTop).coerceAtLeast(1)
         val centerX = (scaledLeft + scaledRight) / 2
         val centerY = (scaledTop + scaledBottom) / 2
@@ -261,8 +314,8 @@ class StereoAnalyzer {
         val cropRight = cropLeft + rawSide
         val cropBottom = cropTop + rawSide
 
-        val cropL = warpL.submat(cropTop, cropBottom, cropLeft, cropRight)
-        val cropR = warpR.submat(cropTop, cropBottom, cropLeft, cropRight)
+        val cropL = fullLeft.submat(cropTop, cropBottom, cropLeft, cropRight)
+        val cropR = warpedRight.submat(cropTop, cropBottom, cropLeft, cropRight)
         val finalSide = Geometry.fullOutputSide(rawSide)
         val outL = Mat()
         val outR = Mat()
@@ -270,14 +323,14 @@ class StereoAnalyzer {
             cropL.copyTo(outL)
             cropR.copyTo(outR)
         } else {
+            // Aynı uniform ölçek iki göze de uygulanır; stereo geometrisi korunur.
             Imgproc.resize(cropL, outL, Size(finalSide.toDouble(), finalSide.toDouble()))
             Imgproc.resize(cropR, outR, Size(finalSide.toDouble(), finalSide.toDouble()))
         }
 
         cropL.release()
         cropR.release()
-        warpL.release()
-        warpR.release()
+        warpedRight.release()
 
         val joined = Mat()
         Core.hconcat(listOf(outL, outR), joined)
@@ -288,7 +341,9 @@ class StereoAnalyzer {
         joined.release()
         return try {
             ByteArrayOutputStream().use { stream ->
-                check(bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)) { "Yüksek çözünürlüklü JPEG kodlanamadı" }
+                check(bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)) {
+                    "Yüksek çözünürlüklü JPEG kodlanamadı"
+                }
                 stream.toByteArray()
             }
         } finally {
@@ -296,32 +351,71 @@ class StereoAnalyzer {
         }
     }
 
-    private fun scaleHomography(source: Mat, scaleX: Double, scaleY: Double): Mat {
-        val toFull = Mat.eye(3, 3, CvType.CV_64F)
-        val toAnalysis = Mat.eye(3, 3, CvType.CV_64F)
-        toFull.put(0, 0, scaleX)
-        toFull.put(1, 1, scaleY)
-        toAnalysis.put(0, 0, 1.0 / scaleX)
-        toAnalysis.put(1, 1, 1.0 / scaleY)
+    private fun rigidMatrix(width: Int, height: Int, alignment: RigidAlignment): Mat {
+        val centerX = width / 2.0
+        val centerY = height / 2.0
+        val radians = Math.toRadians(alignment.angleDegrees)
+        val c = cos(radians)
+        val s = sin(radians)
+        val offsetX = centerX - c * centerX + s * centerY + alignment.translateX
+        val offsetY = centerY - s * centerX - c * centerY + alignment.translateY
 
-        val temp = Mat()
-        val result = Mat()
-        Core.gemm(toFull, source, 1.0, Mat(), 0.0, temp)
-        Core.gemm(temp, toAnalysis, 1.0, Mat(), 0.0, result)
-        toFull.release()
-        toAnalysis.release()
-        temp.release()
-        return result
+        return Mat(2, 3, CvType.CV_64F).also { matrix ->
+            matrix.put(
+                0,
+                0,
+                c,
+                -s,
+                offsetX,
+                s,
+                c,
+                offsetY
+            )
+        }
+    }
+
+    private fun transformRightPoint(
+        x: Double,
+        y: Double,
+        width: Int,
+        height: Int,
+        alignment: RigidAlignment
+    ): Point {
+        val centerX = width / 2.0
+        val centerY = height / 2.0
+        val radians = Math.toRadians(alignment.angleDegrees)
+        val c = cos(radians)
+        val s = sin(radians)
+        val localX = x - centerX
+        val localY = y - centerY
+        return Point(
+            c * localX - s * localY + centerX + alignment.translateX,
+            s * localX + c * localY + centerY + alignment.translateY
+        )
+    }
+
+    private fun insetSquare(square: CropSquare, inset: Int): CropSquare {
+        val usableInset = inset.coerceAtMost((square.width - 1) / 2).coerceAtLeast(0)
+        return CropSquare(
+            left = square.left + usableInset,
+            top = square.top + usableInset,
+            right = square.right - usableInset,
+            bottom = square.bottom - usableInset
+        )
     }
 
     private fun bitmapToCommonMat(bitmap: Bitmap, width: Int, height: Int): Mat {
         val raw = Mat()
         Utils.bitmapToMat(bitmap, raw)
         if (raw.cols() == width && raw.rows() == height) return raw
-        val resized = Mat()
-        Imgproc.resize(raw, resized, Size(width.toDouble(), height.toDouble()))
+
+        val left = ((raw.cols() - width) / 2).coerceAtLeast(0)
+        val top = ((raw.rows() - height) / 2).coerceAtLeast(0)
+        val roi = raw.submat(top, top + height, left, left + width)
+        val cropped = roi.clone()
+        roi.release()
         raw.release()
-        return resized
+        return cropped
     }
 
     private fun resized(source: Mat, width: Int, height: Int): Mat {
@@ -329,17 +423,14 @@ class StereoAnalyzer {
         return Mat().also { Imgproc.resize(source, it, Size(width.toDouble(), height.toDouble())) }
     }
 
-    private fun sane(h: Mat): Boolean {
-        val values = DoubleArray(9)
-        if (h.rows() != 3 || h.cols() != 3) return false
-        h.get(0, 0, values)
-        return Geometry.saneHomography(values)
-    }
-
     private fun Mat.bitmap() =
         Bitmap.createBitmap(cols(), rows(), Bitmap.Config.ARGB_8888).also {
             Utils.matToBitmap(this, it)
         }
 
-    companion object { private const val ANALYSIS_MAX_SIDE = 2048 }
+    companion object {
+        private const val ANALYSIS_MAX_SIDE = 2048
+        private const val MAX_VERTICAL_ERROR_PX = 2.5
+        private const val SAFE_CROP_INSET_PX = 2
+    }
 }
