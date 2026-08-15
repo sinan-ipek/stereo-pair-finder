@@ -92,10 +92,20 @@ class StereoAnalyzer {
         }
 
         val evidence = inlierMatches.size >= MIN_GEOMETRIC_INLIERS
+
+        // İki şeyi birlikte ölçüyoruz:
+        // 1) İyi descriptor eşleşmelerinin ne kadarı gerçek geometrik inlier?
+        // 2) Mutlak olarak yeterince çok güvenilir eşleşme var mı?
+        // Böylece yüksek paralakslı gerçek stereo çiftler, yalnızca çok sayıda
+        // ORB noktası bulunduğu için haksız biçimde düşük puan almıyor.
         val similarity = if (!evidence || good.isEmpty()) {
             0.0
         } else {
-            (100.0 * inlierMatches.size / good.size.toDouble()).coerceIn(0.0, 100.0)
+            val inlierRatioScore = 100.0 * inlierMatches.size / good.size.toDouble()
+            val evidenceCountScore =
+                100.0 * inlierMatches.size / (inlierMatches.size + EVIDENCE_SCORE_HALF_SATURATION)
+            (SIMILARITY_RATIO_WEIGHT * inlierRatioScore +
+                SIMILARITY_COUNT_WEIGHT * evidenceCountScore).coerceIn(0.0, 100.0)
         }
 
         var aligned = false
@@ -171,7 +181,8 @@ class StereoAnalyzer {
                 )
 
                 if (square != null) {
-                    confidence = (100.0 - median * 15.0).coerceIn(0.0, 100.0) *
+                    confidence = (100.0 - median * VERTICAL_ERROR_CONFIDENCE_PENALTY)
+                        .coerceIn(0.0, 100.0) *
                         (inlierMatches.size / (inlierMatches.size + 15.0))
                     aligned = median <= MAX_VERTICAL_ERROR_PX && area >= .35
 
@@ -425,7 +436,11 @@ class StereoAnalyzer {
     companion object {
         private const val ANALYSIS_MAX_SIDE = 2048
         private const val MIN_GEOMETRIC_INLIERS = 18
-        private const val MAX_VERTICAL_ERROR_PX = 2.5
+        private const val EVIDENCE_SCORE_HALF_SATURATION = 40.0
+        private const val SIMILARITY_RATIO_WEIGHT = 0.60
+        private const val SIMILARITY_COUNT_WEIGHT = 0.40
+        private const val MAX_VERTICAL_ERROR_PX = 4.0
+        private const val VERTICAL_ERROR_CONFIDENCE_PENALTY = 10.0
         private const val SAFE_CROP_INSET_PX = 2
     }
 }
