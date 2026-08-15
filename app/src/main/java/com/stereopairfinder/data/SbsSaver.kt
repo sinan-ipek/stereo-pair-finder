@@ -11,6 +11,7 @@ import java.util.UUID
 
 class SbsSaver(private val resolver: ContentResolver) {
     data class Saved(val name: String, val location: String = OUTPUT_PATH)
+
     fun uniqueName(now: Instant = Instant.now(), uuid: UUID = UUID.randomUUID()): String =
         "SBS_${DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS").withZone(ZoneOffset.UTC).format(now)}_${uuid}.jpg"
 
@@ -48,5 +49,8 @@ class SbsSaver(private val resolver: ContentResolver) {
         }
     }
 
-    companion object { const val OUTPUT_PATH = "Pictures/Stereo SBS Test/" }
+    companion object {
+        const val OUTPUT_PATH = "Pictures/Stereo SBS/"
+        const val LEGACY_OUTPUT_PATH = "Pictures/Stereo SBS Test/"
+    }
 }
