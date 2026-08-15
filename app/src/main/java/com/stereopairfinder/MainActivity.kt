@@ -2,6 +2,7 @@ package com.stereopairfinder
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -16,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
@@ -79,6 +81,7 @@ fun Screen(vm: MainViewModel = viewModel()) {
     if (showScanSettings) {
         ScanSettingsDialog(
             initial = pendingScanSettings,
+            resumeAvailable = state.resumeAvailable,
             onDismiss = { showScanSettings = false },
             onStart = { settings ->
                 pendingScanSettings = settings
@@ -121,7 +124,16 @@ fun Screen(vm: MainViewModel = viewModel()) {
                     }
 
                     Button(
-                        onClick = { showScanSettings = true },
+                        onClick = {
+                            pendingScanSettings = pendingScanSettings.copy(
+                                startMode = if (state.resumeAvailable) {
+                                    ScanStartMode.RESUME
+                                } else {
+                                    ScanStartMode.FROM_START
+                                }
+                            )
+                            showScanSettings = true
+                        },
                         enabled = !state.busy,
                         modifier = Modifier.weight(1f)
                     ) {
@@ -188,6 +200,7 @@ fun Screen(vm: MainViewModel = viewModel()) {
 @Composable
 private fun ScanSettingsDialog(
     initial: ScanSettings,
+    resumeAvailable: Boolean,
     onDismiss: () -> Unit,
     onStart: (ScanSettings) -> Unit
 ) {
@@ -195,6 +208,15 @@ private fun ScanSettingsDialog(
     var verticalBias by remember { mutableFloatStateOf(initial.render.verticalBias) }
     var maxSeconds by remember { mutableIntStateOf(initial.maxSeconds) }
     var similarity by remember { mutableIntStateOf(initial.similarity) }
+    var startMode by remember {
+        mutableStateOf(
+            if (initial.startMode == ScanStartMode.RESUME && resumeAvailable) {
+                ScanStartMode.RESUME
+            } else {
+                ScanStartMode.FROM_START
+            }
+        )
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -202,27 +224,48 @@ private fun ScanSettingsDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Kadraj")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (cropMode == CropMode.FIT) {
-                        Button(onClick = { cropMode = CropMode.FIT }) { Text("Fit") }
-                        OutlinedButton(onClick = { cropMode = CropMode.FILL }) { Text("Fill") }
-                    } else {
-                        OutlinedButton(onClick = { cropMode = CropMode.FIT }) { Text("Fit") }
-                        Button(onClick = { cropMode = CropMode.FILL }) { Text("Fill") }
-                    }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ChoiceButton("Fit", cropMode == CropMode.FIT) { cropMode = CropMode.FIT }
+                    ChoiceButton("4:3", cropMode == CropMode.FOUR_THREE) { cropMode = CropMode.FOUR_THREE }
+                    ChoiceButton("Fill", cropMode == CropMode.FILL) { cropMode = CropMode.FILL }
                 }
                 Text(
-                    if (cropMode == CropMode.FIT) "Fit: ortak alanı mümkün olduğunca korur."
-                    else "Fill: kareyi doldurur; gerekirse üstten/alttan kırpar.",
+                    when (cropMode) {
+                        CropMode.FIT -> "Fit: ortak alanı mümkün olduğunca korur."
+                        CropMode.FOUR_THREE -> "4:3: yatay fotoğrafı 4:3, dikey fotoğrafı otomatik 3:4 yapar."
+                        CropMode.FILL -> "Fill: kareyi doldurur; gerekirse daha fazla kırpar."
+                    },
                     style = MaterialTheme.typography.bodySmall
                 )
 
                 Text("Dikey kadraj")
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    FramingButton("Yukarı", verticalBias == -0.5f) { verticalBias = -0.5f }
-                    FramingButton("Ortala", verticalBias == 0f) { verticalBias = 0f }
-                    FramingButton("Aşağı", verticalBias == 0.5f) { verticalBias = 0.5f }
+                    ChoiceButton("Yukarı", verticalBias == -0.5f) { verticalBias = -0.5f }
+                    ChoiceButton("Ortala", verticalBias == 0f) { verticalBias = 0f }
+                    ChoiceButton("Aşağı", verticalBias == 0.5f) { verticalBias = 0.5f }
                 }
+
+                HorizontalDivider()
+                Text("Tarama")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ChoiceButton(
+                        label = "↺ Baştan",
+                        selected = startMode == ScanStartMode.FROM_START
+                    ) { startMode = ScanStartMode.FROM_START }
+                    ChoiceButton(
+                        label = "▶ Devam",
+                        selected = startMode == ScanStartMode.RESUME,
+                        enabled = resumeAvailable
+                    ) { startMode = ScanStartMode.RESUME }
+                }
+                Text(
+                    when {
+                        !resumeAvailable -> "Henüz kayıtlı tarama noktası yok; ilk tarama Baştan yapılacak."
+                        startMode == ScanStartMode.RESUME -> "Son işlenen MediaStore fotoğrafından sonraki çiftlerle devam eder."
+                        else -> "Kayıtlı tarama noktası sıfırlanır ve tüm galeri yeniden taranır."
+                    },
+                    style = MaterialTheme.typography.bodySmall
+                )
 
                 Text("Azami zaman farkı: $maxSeconds saniye")
                 Slider(
@@ -253,7 +296,8 @@ private fun ScanSettingsDialog(
                         ScanSettings(
                             render = RenderSettings(cropMode, verticalBias),
                             maxSeconds = maxSeconds,
-                            similarity = similarity
+                            similarity = similarity,
+                            startMode = startMode
                         )
                     )
                 }
@@ -264,9 +308,17 @@ private fun ScanSettingsDialog(
 }
 
 @Composable
-private fun FramingButton(label: String, selected: Boolean, onClick: () -> Unit) {
-    if (selected) Button(onClick = onClick) { Text(label) }
-    else OutlinedButton(onClick = onClick) { Text(label) }
+private fun ChoiceButton(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    if (selected) {
+        Button(onClick = onClick, enabled = enabled) { Text(label) }
+    } else {
+        OutlinedButton(onClick = onClick, enabled = enabled) { Text(label) }
+    }
 }
 
 @Composable
@@ -308,58 +360,48 @@ private fun ResultCard(
 
             if (result.leftPreview != null && result.rightPreview != null) {
                 Text("Kadraj")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (cropMode == CropMode.FIT) {
-                        Button(onClick = { cropMode = CropMode.FIT }) { Text("Fit") }
-                        OutlinedButton(onClick = { cropMode = CropMode.FILL }) { Text("Fill") }
-                    } else {
-                        OutlinedButton(onClick = { cropMode = CropMode.FIT }) { Text("Fit") }
-                        Button(onClick = { cropMode = CropMode.FILL }) { Text("Fill") }
-                    }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ChoiceButton("Fit", cropMode == CropMode.FIT) { cropMode = CropMode.FIT }
+                    ChoiceButton("4:3", cropMode == CropMode.FOUR_THREE) { cropMode = CropMode.FOUR_THREE }
+                    ChoiceButton("Fill", cropMode == CropMode.FILL) { cropMode = CropMode.FILL }
                     OutlinedButton(onClick = { verticalBias = 0f }) { Text("Sıfırla") }
                 }
 
-                val imageScale = if (cropMode == CropMode.FIT) ContentScale.Fit else ContentScale.Crop
-                val imageAlignment = BiasAlignment(0f, verticalBias)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .aspectRatio(2f)
                         .pointerInput(cropMode) {
                             detectVerticalDragGestures { _, dragAmount ->
-                                if (cropMode == CropMode.FILL) {
-                                    verticalBias = (verticalBias - dragAmount / 220f).coerceIn(-1f, 1f)
-                                }
+                                verticalBias = (verticalBias - dragAmount / 220f).coerceIn(-1f, 1f)
                             }
                         }
                 ) {
-                    Image(
-                        bitmap = result.leftPreview.asImageBitmap(),
-                        contentDescription = "Sol göz",
-                        modifier = Modifier.weight(1f).fillMaxHeight(),
-                        contentScale = imageScale,
-                        alignment = imageAlignment
+                    EyePreview(
+                        bitmap = result.leftPreview,
+                        cropMode = cropMode,
+                        verticalBias = verticalBias,
+                        modifier = Modifier.weight(1f).fillMaxHeight()
                     )
-                    Image(
-                        bitmap = result.rightPreview.asImageBitmap(),
-                        contentDescription = "Sağ göz",
-                        modifier = Modifier.weight(1f).fillMaxHeight(),
-                        contentScale = imageScale,
-                        alignment = imageAlignment
+                    EyePreview(
+                        bitmap = result.rightPreview,
+                        cropMode = cropMode,
+                        verticalBias = verticalBias,
+                        modifier = Modifier.weight(1f).fillMaxHeight()
                     )
                 }
 
                 Text(
-                    if (cropMode == CropMode.FILL) {
-                        "Fotoğrafları birlikte yukarı/aşağı kaydırmak için önizleme üzerinde parmağınızı sürükleyin."
-                    } else {
-                        "Fit modunda mümkün olan ortak alan korunur; gereksiz üst/alt kırpma yapılmaz."
+                    when (cropMode) {
+                        CropMode.FIT -> "Fit: mümkün olan ortak alanı korur. Parmağınızla iki gözü birlikte yukarı/aşağı taşıyabilirsiniz."
+                        CropMode.FOUR_THREE -> "4:3: yataysa 4:3, dikeyse 3:4 kadraj. Parmağınızla üst-alt kompozisyonu seçebilirsiniz."
+                        CropMode.FILL -> "Fill: kareyi doldurur. Parmağınızla hangi üst-alt bölgenin kalacağını seçebilirsiniz."
                     },
                     style = MaterialTheme.typography.bodySmall
                 )
 
                 val blinkBitmap = if (showRight) result.rightPreview else result.leftPreview
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Blink: ${if (showRight) "sağ" else "sol"}")
                     Switch(showRight, { showRight = it })
                 }
@@ -381,6 +423,55 @@ private fun ResultCard(
                 ) {
                     Text("Bu sonucu kaydet")
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EyePreview(
+    bitmap: Bitmap,
+    cropMode: CropMode,
+    verticalBias: Float,
+    modifier: Modifier = Modifier
+) {
+    val alignment = BiasAlignment(0f, verticalBias.coerceIn(-1f, 1f))
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        when (cropMode) {
+            CropMode.FIT -> {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit,
+                    alignment = alignment
+                )
+            }
+
+            CropMode.FOUR_THREE -> {
+                val portrait = bitmap.height > bitmap.width
+                val frame = if (portrait) {
+                    Modifier.fillMaxHeight().aspectRatio(3f / 4f)
+                } else {
+                    Modifier.fillMaxWidth().aspectRatio(4f / 3f)
+                }
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = frame,
+                    contentScale = ContentScale.Crop,
+                    alignment = alignment
+                )
+            }
+
+            CropMode.FILL -> {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                    alignment = alignment
+                )
             }
         }
     }
