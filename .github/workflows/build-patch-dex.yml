@@ -1,0 +1,58 @@
+name: Build swap patch dex
+
+on:
+  push:
+    branches:
+      - agent/current-apk-recovery
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Resolve Android compile classpath
+        run: |
+          cat > /tmp/patch.init.gradle <<'EOF'
+          gradle.projectsEvaluated {
+            def p = gradle.rootProject.project(':app')
+            p.tasks.register('writePatchClasspath') {
+              doLast {
+                file('/tmp/patch-classpath.txt').text = p.configurations.debugCompileClasspath.asPath
+              }
+            }
+          }
+          EOF
+          gradle -I /tmp/patch.init.gradle :app:writePatchClasspath --stacktrace
+      - name: Compile SwapActivity
+        run: |
+          mkdir -p /tmp/patch-classes /tmp/patch-dex
+          CP="$(cat /tmp/patch-classpath.txt):$ANDROID_HOME/platforms/android-35/android.jar"
+          javac -source 17 -target 17 -cp "$CP" -d /tmp/patch-classes patchsrc/com/stereopairfinder/SwapActivity.java
+          jar cf /tmp/swap-patch.jar -C /tmp/patch-classes .
+          D8="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name d8 | sort -V | tail -1)"
+          "$D8" --min-api 29 --lib "$ANDROID_HOME/platforms/android-35/android.jar" --classpath "$CP" --output /tmp/patch-dex /tmp/swap-patch.jar
+          cp /tmp/patch-dex/classes.dex swap-patch.dex
+      - name: Package signing tools
+        run: |
+          BT="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          mkdir -p signing-tools/lib
+          cp "$BT/apksigner" signing-tools/
+          cp "$BT/zipalign" signing-tools/
+          cp "$BT/lib/apksigner.jar" signing-tools/lib/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swap-patch-dex
+          path: swap-patch.dex
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-signing-tools
+          path: signing-tools/
+          if-no-files-found: error
