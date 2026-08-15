@@ -49,26 +49,6 @@ jobs:
               (
                   'CropMode.FIT -> "Fit: mümkün olan ortak alanı korur. Parmağınızla iki gözü birlikte yukarı/aşağı taşıyabilirsiniz."',
                   'CropMode.FIT -> "Fit: mümkün olan ortak alanı korur; siyah boşluk gerekiyorsa görüntü üst-alt tam ortalanır."'
-              ),
-              (
-                  '''            CropMode.FIT -> {
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Fit,
-                    alignment = alignment
-                )
-            }''',
-                  '''            CropMode.FIT -> {
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Fit,
-                    alignment = Alignment.Center
-                )
-            }'''
               )
           ]
 
@@ -96,6 +76,14 @@ jobs:
           text, count = swap_pattern.subn(swap_replacement, text, count=1)
           if count != 1:
               raise SystemExit(f"Swap control replacement count: {count}")
+
+          fit_preview_pattern = re.compile(
+              r'(CropMode\.FIT -> \{\s*Image\(.*?contentScale = ContentScale\.Fit,\s*)alignment = alignment',
+              re.DOTALL
+          )
+          text, count = fit_preview_pattern.subn(r'\1alignment = Alignment.Center', text, count=1)
+          if count != 1:
+              raise SystemExit(f"Fit preview alignment replacement count: {count}")
 
           main.write_text(text)
 
